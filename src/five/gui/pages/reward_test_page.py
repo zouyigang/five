@@ -6,7 +6,11 @@ from tkinter import ttk
 from five.core.move import Move
 from five.core.state import GameState
 from five.gui.widgets.board_canvas import BoardCanvas
-from five.train.reward import compute_process_reward_with_details, RewardResult
+from five.train.reward import (
+    RewardResult,
+    compute_hybrid_reward_with_details,
+    compute_process_reward_with_details,
+)
 
 
 class RewardTestPage(ttk.Frame):
@@ -105,7 +109,14 @@ class RewardTestPage(ttk.Frame):
         self.history_states.append(self.state.copy())
 
         player = self.state.current_player
-        reward_result = compute_process_reward_with_details(self.state.board, move, player)
+        next_board = self.state.board.copy()
+        next_board.apply_move(move, player)
+        winner = next_board.check_winner(move)
+
+        if winner != 0 or next_board.is_full():
+            reward_result = compute_hybrid_reward_with_details(self.state.board, move, player, winner)
+        else:
+            reward_result = compute_process_reward_with_details(self.state.board, move, player)
         self.last_reward_result = reward_result
 
         self.move_history.append((move.row, move.col, player, reward_result))

@@ -35,10 +35,10 @@ class RewardConfig:
 
     miss_immediate_win_penalty: float = 1.5
     miss_own_immediate_win_penalty: float = 2.0
-    miss_open_four_penalty: float = 1.2
+    miss_open_four_penalty: float = 1.5
     miss_four_three_penalty: float = 0.9
     miss_double_three_penalty: float = 0.9
-    miss_rush_four_penalty: float = 0.6
+    miss_rush_four_penalty: float = 1.1
     miss_open_three_penalty: float = 0.25
     miss_jump_open_three_penalty: float = 0.15
 

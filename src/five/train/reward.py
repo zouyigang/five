@@ -412,14 +412,21 @@ class ThreatInventory:
 
 PRIMARY_CATEGORY_ORDER = (
     "immediate_win",
-    "open_four",
     "double_four",
+    "open_four",
     "four_three",
     "double_three",
     "rush_four",
     "open_three",
     "jump_open_three",
     "sleep_three",
+)
+
+BLOCK_MISS_CATEGORY_ORDER = (
+    "open_four",
+    "rush_four",
+    "open_three",
+    "jump_open_three",
 )
 
 
@@ -438,6 +445,19 @@ def _shape_weight_map(config: RewardConfig) -> dict[str, float]:
         "open_three": config.open_three_score,
         "jump_open_three": config.jump_open_three_score,
         "sleep_three": config.sleep_three_score,
+    }
+
+
+def _shape_label_map() -> dict[str, str]:
+    return {
+        "open_four": "形成活四",
+        "rush_four": "形成冲四/跳四",
+        "open_three": "形成活三",
+        "jump_open_three": "形成跳活三",
+        "sleep_three": "形成眠三",
+        "double_four": "形成双四",
+        "four_three": "形成冲四活三/四三",
+        "double_three": "形成双活三",
     }
 
 
@@ -528,23 +548,29 @@ def _accumulate_shape_reward(
     scale: float,
     config: RewardConfig,
 ) -> float:
-    raw_score = 0.0
-    contributions = (
-        ("open_four", features.open_four, config.open_four_score, "形成活四"),
-        ("rush_four", features.rush_four, config.rush_four_score, "形成冲四/跳四"),
-        ("open_three", features.open_three, config.open_three_score, "形成活三"),
-        ("jump_open_three", features.jump_open_three, config.jump_open_three_score, "形成跳活三"),
-        ("sleep_three", features.sleep_three, config.sleep_three_score, "形成眠三"),
-        ("double_four", features.double_four, config.double_four_score, "形成双四"),
-        ("four_three", features.four_three, config.four_three_score, "形成冲四活三/四三"),
-        ("double_three", features.double_three, config.double_three_score, "形成双活三"),
-    )
-    for _, count, weight, reason in contributions:
-        if count <= 0:
-            continue
-        raw_score += count * weight
-        details.append(RewardDetail(amount=count * weight * scale, reason=f"{reason} x{count}"))
-    return raw_score * scale
+    category = _primary_category(features)
+    if category is None or category == "immediate_win":
+        return 0.0
+
+    counts = {
+        "open_four": features.open_four,
+        "rush_four": features.rush_four,
+        "open_three": features.open_three,
+        "jump_open_three": features.jump_open_three,
+        "sleep_three": features.sleep_three,
+        "double_four": features.double_four,
+        "four_three": features.four_three,
+        "double_three": features.double_three,
+    }
+    count = counts[category]
+    if count <= 0:
+        return 0.0
+
+    weight = _shape_weight_map(config)[category]
+    reason = _shape_label_map()[category]
+    amount = count * weight * scale
+    details.append(RewardDetail(amount=amount, reason=f"{reason} x{count}"))
+    return amount
 
 
 def _accumulate_block_reward(
@@ -555,7 +581,6 @@ def _accumulate_block_reward(
 ) -> float:
     weights = _shape_weight_map(config)
     labels = {
-        "immediate_win": "封堵对方直接成五点",
         "open_four": "封堵对方活四",
         "double_four": "封堵对方双四",
         "four_three": "封堵对方冲四活三/四三",
@@ -563,10 +588,9 @@ def _accumulate_block_reward(
         "rush_four": "封堵对方冲四/跳四",
         "open_three": "封堵对方活三",
         "jump_open_three": "封堵对方跳活三",
-        "sleep_three": "封堵对方眠三",
     }
     reward = 0.0
-    for category in PRIMARY_CATEGORY_ORDER:
+    for category in BLOCK_MISS_CATEGORY_ORDER:
         removed = max(0, before.get(category) - after.get(category))
         if removed <= 0:
             continue
@@ -583,11 +607,7 @@ def _accumulate_miss_penalty(
     config: RewardConfig,
 ) -> float:
     penalties = (
-        ("immediate_win", config.miss_immediate_win_penalty, "未化解对方直接成五点"),
         ("open_four", config.miss_open_four_penalty, "未化解对方活四"),
-        ("double_four", config.miss_open_four_penalty, "未化解对方双四"),
-        ("four_three", config.miss_four_three_penalty, "未化解对方冲四活三/四三"),
-        ("double_three", config.miss_double_three_penalty, "未化解对方双活三"),
         ("rush_four", config.miss_rush_four_penalty, "未化解对方冲四/跳四"),
         ("open_three", config.miss_open_three_penalty, "未压制对方活三"),
         ("jump_open_three", config.miss_jump_open_three_penalty, "未压制对方跳活三"),
@@ -701,6 +721,7 @@ def compute_process_reward_with_details(
 
     opponent_before = _scan_existing_threat_inventory(board, opponent)
     my_features = _evaluate_move_features(board, move, player)
+    is_winning_move = my_features.five > 0
 
     board.grid[move.row, move.col] = player
     opponent_after = _scan_existing_threat_inventory(board, opponent)
@@ -708,7 +729,10 @@ def compute_process_reward_with_details(
 
     attack_reward = _accumulate_shape_reward(details, my_features, config.attack_scale, config)
     block_reward = _accumulate_block_reward(details, opponent_before, opponent_after, config)
-    miss_penalty = _accumulate_miss_penalty(details, opponent_before, opponent_after, config)
+    # A direct win ends the game immediately, so opponent threats no longer matter.
+    miss_penalty = 0.0
+    if not is_winning_move:
+        miss_penalty = _accumulate_miss_penalty(details, opponent_before, opponent_after, config)
     missed_own_win_penalty = _accumulate_missed_own_win_penalty(details, board, move, player, config)
     opening_position_reward = _accumulate_opening_position_reward(details, board, move, config)
 

@@ -45,7 +45,8 @@ def test_blocking_opponent_immediate_win_is_rewarded():
     result = compute_process_reward_with_details(board, Move(4, 5), 1)
 
     assert result.total_reward > 0
-    assert any("成五点" in detail.reason or "活四" in detail.reason for detail in result.details)
+    assert any("冲四" in detail.reason or "活四" in detail.reason for detail in result.details)
+    assert not any("成五点" in detail.reason for detail in result.details)
 
 
 def test_missing_opponent_immediate_win_is_penalized():
@@ -63,7 +64,8 @@ def test_missing_opponent_immediate_win_is_penalized():
     result = compute_process_reward_with_details(board, Move(0, 0), 1)
 
     assert result.total_reward < 0
-    assert any("未化解" in detail.reason for detail in result.details)
+    assert any("未化解对方冲四/跳四" in detail.reason or "未化解对方活四" in detail.reason for detail in result.details)
+    assert not any("未化解对方直接成五点" in detail.reason for detail in result.details)
 
 
 def test_no_miss_penalty_for_only_potential_future_threes():
@@ -115,6 +117,90 @@ def test_missing_own_immediate_win_is_penalized_more_than_open_three_reward():
 
     assert result.total_reward < 0
     assert any("错失直接获胜落点" in detail.reason for detail in result.details)
+
+
+def test_winning_move_is_not_penalized_for_unresolved_opponent_open_three():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 0, 1),
+            (4, 1, 1),
+            (4, 2, 1),
+            (4, 3, 1),
+            (2, 2, -1),
+            (2, 3, -1),
+            (2, 4, -1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(4, 4), 1)
+
+    assert not any("未压制对方活三" in detail.reason for detail in result.details)
+    assert not any("未压制对方跳活三" in detail.reason for detail in result.details)
+
+
+def test_blocking_opponent_winning_point_does_not_double_count_as_rush_four():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 4, 1),
+            (3, 5, -1),
+            (3, 4, 1),
+            (2, 4, -1),
+            (3, 3, 1),
+            (4, 6, -1),
+            (5, 4, 1),
+            (5, 7, -1),
+            (6, 4, 1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(7, 4), -1)
+
+    assert any("封堵对方冲四/跳四" in detail.reason for detail in result.details)
+    assert not any("封堵对方直接成五点" in detail.reason for detail in result.details)
+    assert result.total_reward < 0
+
+
+def test_missing_opponent_rush_four_outweighs_non_terminal_open_four_gain():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 4, 1),
+            (4, 3, -1),
+            (3, 4, 1),
+            (5, 4, -1),
+            (2, 4, 1),
+            (6, 5, -1),
+            (3, 2, 1),
+            (1, 4, -1),
+            (3, 3, 1),
+            (7, 6, -1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(3, 5), 1)
+
+    assert any("形成活四" in detail.reason for detail in result.details)
+    assert any("未化解对方冲四/跳四" in detail.reason for detail in result.details)
+    assert result.total_reward < 0
+
+
+def test_double_three_uses_primary_shape_reward_without_open_three_stacking():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 4, 1),
+            (4, 5, 1),
+            (3, 3, 1),
+            (5, 3, 1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(4, 3), 1)
+
+    assert any("形成双活三" in detail.reason for detail in result.details)
+    assert not any("形成活三" in detail.reason for detail in result.details)
 
 
 def test_opening_center_move_is_rewarded():
