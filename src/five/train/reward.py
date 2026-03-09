@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from five.common.config import RewardConfig
 from five.core.board import Board
 from five.core.move import Move
 from five.core.rules import DIRECTIONS, in_bounds
@@ -409,39 +410,6 @@ class ThreatInventory:
         return int(getattr(self, category))
 
 
-@dataclass(slots=True)
-class RewardConfig:
-    attack_scale: float = 0.02
-    block_scale: float = 0.018
-    max_process_reward: float = 1.5
-    max_total_reward: float = 2.5
-
-    final_win_reward: float = 1.0
-    draw_reward: float = 0.0
-    outcome_tail_bonus: float = 0.35
-    outcome_decay: float = 0.9
-    outcome_horizon: int = 8
-
-    immediate_win_score: float = 100.0
-    open_four_score: float = 45.0
-    double_four_score: float = 55.0
-    four_three_score: float = 40.0
-    double_three_score: float = 35.0
-    rush_four_score: float = 20.0
-    open_three_score: float = 10.0
-    jump_open_three_score: float = 7.0
-    sleep_three_score: float = 3.0
-
-    miss_immediate_win_penalty: float = 1.5
-    miss_own_immediate_win_penalty: float = 2.0
-    miss_open_four_penalty: float = 1.2
-    miss_four_three_penalty: float = 0.9
-    miss_double_three_penalty: float = 0.9
-    miss_rush_four_penalty: float = 0.6
-    miss_open_three_penalty: float = 0.25
-    miss_jump_open_three_penalty: float = 0.15
-
-
 PRIMARY_CATEGORY_ORDER = (
     "immediate_win",
     "open_four",
@@ -660,6 +628,45 @@ def _accumulate_missed_own_win_penalty(
     return amount
 
 
+def _accumulate_opening_position_reward(
+    details: list[RewardDetail],
+    board: Board,
+    move: Move,
+    config: RewardConfig,
+) -> float:
+    stones_played = int(np.count_nonzero(board.grid))
+    if stones_played >= config.opening_position_horizon:
+        return 0.0
+
+    row, col = move.row, move.col
+    last_index = board.size - 1
+    is_corner = (row, col) in {
+        (0, 0),
+        (0, last_index),
+        (last_index, 0),
+        (last_index, last_index),
+    }
+    if is_corner:
+        amount = -config.opening_corner_penalty
+        details.append(RewardDetail(amount=amount, reason="开局角落落子惩罚"))
+        return amount
+
+    if row in (0, last_index) or col in (0, last_index):
+        amount = -config.opening_edge_penalty
+        details.append(RewardDetail(amount=amount, reason="开局边线落子惩罚"))
+        return amount
+
+    center = (board.size - 1) / 2.0
+    radius = max(1.0, (board.size - 1) * config.opening_center_radius_ratio)
+    distance_sq = (row - center) ** 2 + (col - center) ** 2
+    if distance_sq <= radius ** 2:
+        amount = config.opening_center_bonus
+        details.append(RewardDetail(amount=amount, reason="开局中心落子奖励"))
+        return amount
+
+    return 0.0
+
+
 def compute_outcome_tail_bonus(
     player: int,
     winner: int,
@@ -703,8 +710,9 @@ def compute_process_reward_with_details(
     block_reward = _accumulate_block_reward(details, opponent_before, opponent_after, config)
     miss_penalty = _accumulate_miss_penalty(details, opponent_before, opponent_after, config)
     missed_own_win_penalty = _accumulate_missed_own_win_penalty(details, board, move, player, config)
+    opening_position_reward = _accumulate_opening_position_reward(details, board, move, config)
 
-    total_reward = attack_reward + block_reward + miss_penalty + missed_own_win_penalty
+    total_reward = attack_reward + block_reward + miss_penalty + missed_own_win_penalty + opening_position_reward
     clipped_reward = _clip(total_reward, -config.max_process_reward, config.max_process_reward)
     if abs(clipped_reward - total_reward) > 1e-8:
         details.append(RewardDetail(amount=clipped_reward - total_reward, reason="过程奖励裁剪"))

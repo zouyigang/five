@@ -7,11 +7,12 @@ import torch
 from five.ai.encoder import encode_state
 from five.ai.inference import ModelAIEngine
 from five.ai.interfaces import AnalysisResult
+from five.common.config import RewardConfig
 from five.core.game import GomokuGame
 from five.core.move import Move
 from five.storage.schemas import GameRecord, MoveRecord, MoveSummary, RewardDetail
 from five.train.dataset import EpisodeBatch, Transition
-from five.train.reward import RewardConfig, compute_hybrid_reward_with_details, compute_outcome_tail_bonus
+from five.train.reward import compute_hybrid_reward_with_details, compute_outcome_tail_bonus
 
 
 @dataclass(slots=True)

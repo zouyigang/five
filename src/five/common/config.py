@@ -4,7 +4,43 @@ from dataclasses import asdict, dataclass, field
 
 from pathlib import Path
 
-from five.train.reward import RewardConfig
+
+@dataclass(slots=True)
+class RewardConfig:
+    attack_scale: float = 0.02
+    block_scale: float = 0.018
+    max_process_reward: float = 1.5
+    max_total_reward: float = 2.5
+    opening_position_horizon: int = 8
+    opening_center_bonus: float = 0.05
+    opening_edge_penalty: float = 0.04
+    opening_corner_penalty: float = 0.1
+    opening_center_radius_ratio: float = 0.18
+
+    final_win_reward: float = 1.0
+    draw_reward: float = 0.0
+    outcome_tail_bonus: float = 0.35
+    outcome_decay: float = 0.9
+    outcome_horizon: int = 8
+
+    immediate_win_score: float = 100.0
+    open_four_score: float = 45.0
+    double_four_score: float = 55.0
+    four_three_score: float = 40.0
+    double_three_score: float = 35.0
+    rush_four_score: float = 20.0
+    open_three_score: float = 10.0
+    jump_open_three_score: float = 7.0
+    sleep_three_score: float = 3.0
+
+    miss_immediate_win_penalty: float = 1.5
+    miss_own_immediate_win_penalty: float = 2.0
+    miss_open_four_penalty: float = 1.2
+    miss_four_three_penalty: float = 0.9
+    miss_double_three_penalty: float = 0.9
+    miss_rush_four_penalty: float = 0.6
+    miss_open_three_penalty: float = 0.25
+    miss_jump_open_three_penalty: float = 0.15
 
 
 @dataclass(slots=True)
