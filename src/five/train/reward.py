@@ -157,10 +157,10 @@ def find_winning_moves(board: Board, player: int) -> list[Move]:
     winning_moves = []
     for move in board.legal_moves():
         board.grid[move.row, move.col] = player
-        threat = get_threat_info(board, move, player)
+        winner = board.check_winner(move)
         board.grid[move.row, move.col] = 0
 
-        if threat.winning_moves > 0:
+        if winner == player:
             winning_moves.append(move)
 
     return winning_moves

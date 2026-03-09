@@ -5,7 +5,7 @@ from five.core.board import Board
 from five.core.move import Move
 from five.core.state import GameState
 from five.train.dataset import EpisodeBatch, Transition
-from five.train.reward import compute_process_reward_with_details
+from five.train.reward import compute_process_reward_with_details, find_winning_moves
 from five.train.self_play import _apply_hybrid_rewards
 
 
@@ -121,6 +121,40 @@ def test_missing_own_immediate_win_is_penalized_more_than_open_three_reward():
     result = compute_process_reward_with_details(board, Move(3, 5), 1)
 
     assert result.total_reward < 0
+    assert any("错失直接获胜落点" in detail.reason for detail in result.details)
+
+
+def test_jump_five_shape_is_not_treated_as_immediate_winning_move():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 1, 1),
+            (4, 2, 1),
+            (4, 4, 1),
+            (4, 5, 1),
+        ],
+    )
+
+    winning_moves = find_winning_moves(board, 1)
+
+    assert Move(4, 3) in winning_moves
+    assert Move(4, 0) not in winning_moves
+    assert Move(4, 6) not in winning_moves
+
+
+def test_false_jump_five_endpoint_does_not_bypass_missed_own_win_penalty():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 1, 1),
+            (4, 2, 1),
+            (4, 4, 1),
+            (4, 5, 1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(4, 0), 1)
+
     assert any("错失直接获胜落点" in detail.reason for detail in result.details)
 
 
