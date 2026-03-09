@@ -581,7 +581,6 @@ def _accumulate_block_reward(
 ) -> float:
     weights = _shape_weight_map(config)
     labels = {
-        "open_four": "封堵对方活四",
         "double_four": "封堵对方双四",
         "four_three": "封堵对方冲四活三/四三",
         "double_three": "封堵对方双活三",
@@ -590,7 +589,14 @@ def _accumulate_block_reward(
         "jump_open_three": "封堵对方跳活三",
     }
     reward = 0.0
+    delayed_open_four = max(0, before.open_four - after.open_four)
+    if delayed_open_four > 0:
+        amount = delayed_open_four * config.delay_open_four_reward
+        details.append(RewardDetail(amount=amount, reason=f"延缓对方活四一手 x{delayed_open_four}"))
+        reward += amount
     for category in BLOCK_MISS_CATEGORY_ORDER:
+        if category == "open_four":
+            continue
         removed = max(0, before.get(category) - after.get(category))
         if removed <= 0:
             continue
@@ -607,7 +613,7 @@ def _accumulate_miss_penalty(
     config: RewardConfig,
 ) -> float:
     penalties = (
-        ("open_four", config.miss_open_four_penalty, "未化解对方活四"),
+        ("open_four", config.miss_open_four_penalty, "未阻止对方活四保持双赢点"),
         ("rush_four", config.miss_rush_four_penalty, "未化解对方冲四/跳四"),
         ("open_three", config.miss_open_three_penalty, "未压制对方活三"),
         ("jump_open_three", config.miss_jump_open_three_penalty, "未压制对方跳活三"),
@@ -619,6 +625,13 @@ def _accumulate_miss_penalty(
             continue
         amount = -unit_penalty * unresolved
         details.append(RewardDetail(amount=amount, reason=f"{reason} x{unresolved}"))
+        total_penalty += amount
+
+    # Blocking one end of an open four still leaves a one-move loss on the other end.
+    downgraded_open_four = min(before.open_four, after.rush_four)
+    if downgraded_open_four > 0:
+        amount = -config.miss_rush_four_penalty * downgraded_open_four
+        details.append(RewardDetail(amount=amount, reason=f"未化解对方冲四/跳四 x{downgraded_open_four}"))
         total_penalty += amount
     return total_penalty
 

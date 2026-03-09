@@ -30,11 +30,10 @@ def test_attack_reward_for_open_three_is_positive():
     assert any("活三" in detail.reason for detail in result.details)
 
 
-def test_blocking_opponent_immediate_win_is_rewarded():
+def test_blocking_opponent_open_four_is_better_than_ignoring_it():
     board = _place(
         Board(size=9, win_length=5),
         [
-            (4, 0, 1),
             (4, 1, -1),
             (4, 2, -1),
             (4, 3, -1),
@@ -42,11 +41,14 @@ def test_blocking_opponent_immediate_win_is_rewarded():
         ],
     )
 
-    result = compute_process_reward_with_details(board, Move(4, 5), 1)
+    block_result = compute_process_reward_with_details(board, Move(4, 0), 1)
+    ignore_result = compute_process_reward_with_details(board, Move(0, 0), 1)
 
-    assert result.total_reward > 0
-    assert any("冲四" in detail.reason or "活四" in detail.reason for detail in result.details)
-    assert not any("成五点" in detail.reason for detail in result.details)
+    assert block_result.total_reward < 0
+    assert block_result.total_reward > ignore_result.total_reward
+    assert any("延缓对方活四一手" in detail.reason for detail in block_result.details)
+    assert any("未化解对方冲四/跳四" in detail.reason for detail in block_result.details)
+    assert not any("封堵对方活四" in detail.reason for detail in block_result.details)
 
 
 def test_missing_opponent_immediate_win_is_penalized():
@@ -64,7 +66,10 @@ def test_missing_opponent_immediate_win_is_penalized():
     result = compute_process_reward_with_details(board, Move(0, 0), 1)
 
     assert result.total_reward < 0
-    assert any("未化解对方冲四/跳四" in detail.reason or "未化解对方活四" in detail.reason for detail in result.details)
+    assert any(
+        "未化解对方冲四/跳四" in detail.reason or "未阻止对方活四保持双赢点" in detail.reason
+        for detail in result.details
+    )
     assert not any("未化解对方直接成五点" in detail.reason for detail in result.details)
 
 
@@ -159,6 +164,24 @@ def test_blocking_opponent_winning_point_does_not_double_count_as_rush_four():
 
     assert any("封堵对方冲四/跳四" in detail.reason for detail in result.details)
     assert not any("封堵对方直接成五点" in detail.reason for detail in result.details)
+    assert result.total_reward < 0
+
+
+def test_delaying_open_four_gives_small_positive_credit_without_counting_as_full_block():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 1, -1),
+            (4, 2, -1),
+            (4, 3, -1),
+            (4, 4, -1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(4, 0), 1)
+
+    assert any("延缓对方活四一手" in detail.reason for detail in result.details)
+    assert not any("封堵对方活四" in detail.reason for detail in result.details)
     assert result.total_reward < 0
 
 
