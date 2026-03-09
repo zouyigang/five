@@ -102,13 +102,13 @@ def test_blocked_three_other_end():
 
 
 def test_blocked_three_board_edge():
-    """眠三：一端抵棋盘边，另一端被对手堵"""
+    """死三：一端抵棋盘边，另一端被对手堵，不应算眠三/活三"""
     board = Board(size=9, win_length=5)
     _place(board, [(0, 4, 1), (1, 4, 1), (3, 4, -1)])
     move = Move(2, 4)
     board.grid[2, 4] = 1
     info = get_threat_info(board, move, 1)
-    assert info.blocked_threes >= 1, "抵边且另一端被堵应为眠三"
+    assert info.blocked_threes == 0, "两端都被堵时不应算眠三"
     assert info.living_threes == 0
 
 
@@ -158,16 +158,37 @@ def test_no_false_living_three_when_blocked():
     assert info.blocked_threes >= 1
 
 
-def test_analyze_line_open_ends_at_board_edge():
-    """跑出棋盘时正确计为开放端"""
+def test_analyze_line_board_edge_counts_as_blocked_end():
+    """抵边的一侧应视为被堵，不计为开放端"""
     board = Board(size=5, win_length=5)
     _place(board, [(2, 0, 1), (2, 1, 1)])
     move = Move(2, 2)
     board.grid[2, 2] = 1
     line = analyze_line(board, move, 1, 0, 1)
     assert line.count == 3
-    assert line.open_ends == 2, "两端都抵边应视为两端开放（或至少一端）"
-    # 注：抵边时一端跑出棋盘会+1，另一端也跑出会+1，共2
+    assert line.open_ends == 1, "一端为空、一端抵边时，应只算 1 个开放端"
+
+
+def test_blocked_three_board_edge_without_opponent():
+    """眠三：一端为空，另一端抵边"""
+    board = Board(size=9, win_length=5)
+    _place(board, [(0, 0, 1), (0, 1, 1)])
+    move = Move(0, 2)
+    board.grid[0, 2] = 1
+    info = get_threat_info(board, move, 1)
+    assert info.blocked_threes >= 1, "贴边三子应为眠三"
+    assert info.living_threes == 0
+
+
+def test_blocked_four_board_edge_without_opponent():
+    """冲四：一端为空，另一端抵边"""
+    board = Board(size=9, win_length=5)
+    _place(board, [(0, 0, 1), (0, 1, 1), (0, 2, 1)])
+    move = Move(0, 3)
+    board.grid[0, 3] = 1
+    info = get_threat_info(board, move, 1)
+    assert info.blocked_fours >= 1, "贴边四子应为冲四"
+    assert info.living_fours == 0
 
 
 def test_analyze_line_blocked_by_opponent_no_double_count():

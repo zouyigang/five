@@ -92,9 +92,7 @@ def analyze_line(
                 # Blocked by opponent
                 break
 
-        # 若因跑出棋盘而退出循环（未 break），则该端为开放端；遇空位或对手时已在循环内处理，此处不再重复计数
-        if not in_bounds(board.size, row, col):
-            open_ends += 1
+        # 棋盘边界视为被堵，不计为开放端；遇空位或对手时已在循环内处理，此处不再重复计数
 
     is_blocked = open_ends == 0
     return LineInfo(
