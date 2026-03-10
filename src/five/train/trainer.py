@@ -9,7 +9,7 @@ from torch import nn
 
 from five.ai.inference import ModelAIEngine
 from five.ai.model import PolicyValueNet
-from five.common.config import TrainingConfig
+from five.common.config import ModelConfig, RewardConfig, TrainingConfig
 from five.common.logging import configure_logging, get_logger
 from five.common.utils import set_seed
 from five.core.game import GomokuGame
@@ -187,15 +187,24 @@ class PPOTrainer:
         # Load optimizer state
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
         
-        # Update config if present
+        # Update config if present (nested model/reward must be restored as dataclasses)
         if "config" in checkpoint:
-            # Update config values from checkpoint
-            for key, value in checkpoint["config"].items():
-                if hasattr(self.config, key):
+            saved = checkpoint["config"]
+            for key, value in saved.items():
+                if not hasattr(self.config, key):
+                    continue
+                if key == "model" and isinstance(value, dict):
+                    subset = {k: v for k, v in value.items() if k in getattr(ModelConfig, "__dataclass_fields__", {})}
+                    setattr(self.config, key, ModelConfig(**subset))
+                elif key == "reward" and isinstance(value, dict):
+                    subset = {k: v for k, v in value.items() if k in getattr(RewardConfig, "__dataclass_fields__", {})}
+                    setattr(self.config, key, RewardConfig(**subset))
+                else:
                     setattr(self.config, key, value)
-        
+        # Resume epoch count
+        self._start_epoch = int(checkpoint.get("epoch", 0)) + 1
+        logger.info("Checkpoint loaded successfully, resuming from epoch %s", self._start_epoch)
         self.model.eval()
-        logger.info(f"Checkpoint loaded successfully")
 
     def _update_policy(self, batch: TrainingBatch):
         if batch.states.size(0) == 0:
