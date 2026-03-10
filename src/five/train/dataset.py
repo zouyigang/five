@@ -21,6 +21,7 @@ class Transition:
     legal_mask: torch.Tensor
     board_before: Board | None = None
     move: Move | None = None
+    move_record_index: int | None = None
 
 
 @dataclass(slots=True)

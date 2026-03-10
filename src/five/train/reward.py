@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -673,6 +674,14 @@ def _accumulate_opening_position_reward(
 
     row, col = move.row, move.col
     last_index = board.size - 1
+    center = (board.size - 1) / 2.0
+    max_distance = max(math.dist((0.0, 0.0), (center, center)), 1.0)
+    distance = math.dist((float(row), float(col)), (center, center))
+    centrality = max(0.0, 1.0 - distance / max_distance)
+    center_bias = config.opening_center_bonus * (centrality**2)
+    if center_bias > 1e-8:
+        details.append(RewardDetail(amount=center_bias, reason="开局中心趋向奖励"))
+
     is_corner = (row, col) in {
         (0, 0),
         (0, last_index),
@@ -680,24 +689,23 @@ def _accumulate_opening_position_reward(
         (last_index, last_index),
     }
     if is_corner:
-        amount = -config.opening_corner_penalty
-        details.append(RewardDetail(amount=amount, reason="开局角落落子惩罚"))
-        return amount
+        penalty = -config.opening_corner_penalty
+        details.append(RewardDetail(amount=penalty, reason="开局角落落子惩罚"))
+        return center_bias + penalty
 
     if row in (0, last_index) or col in (0, last_index):
-        amount = -config.opening_edge_penalty
-        details.append(RewardDetail(amount=amount, reason="开局边线落子惩罚"))
-        return amount
+        penalty = -config.opening_edge_penalty
+        details.append(RewardDetail(amount=penalty, reason="开局边线落子惩罚"))
+        return center_bias + penalty
 
-    center = (board.size - 1) / 2.0
     radius = max(1.0, (board.size - 1) * config.opening_center_radius_ratio)
     distance_sq = (row - center) ** 2 + (col - center) ** 2
     if distance_sq <= radius ** 2:
-        amount = config.opening_center_bonus
-        details.append(RewardDetail(amount=amount, reason="开局中心落子奖励"))
-        return amount
+        bonus = config.opening_center_bonus
+        details.append(RewardDetail(amount=bonus, reason="开局中心落子奖励"))
+        return center_bias + bonus
 
-    return 0.0
+    return center_bias
 
 
 def compute_outcome_tail_bonus(

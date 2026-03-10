@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import random
 from dataclasses import dataclass
 
 import torch
 from torch import nn
 
-from five.ai.encoder import encode_state
 from five.ai.inference import ModelAIEngine
 from five.ai.model import PolicyValueNet
 from five.common.config import TrainingConfig
@@ -46,6 +46,7 @@ class PPOTrainer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.learning_rate)
         self.engine = ModelAIEngine(self.model, device=config.device)
         self.artifacts: RunArtifacts = create_run(config)
+        self.historical_opponent_snapshots: list[dict[str, torch.Tensor]] = []
         
         # Load checkpoint if provided
         if checkpoint_path:
@@ -53,21 +54,39 @@ class PPOTrainer:
 
     def train(self) -> None:
         for epoch in range(1, self.config.epochs + 1):
+            self.model.eval()
             # Temperature annealing: 从1.0降到0.3
             progress = min(epoch / self.config.epochs, 1.0)
             temperature = 1.0 - (1.0 - 0.3) * progress
-            
+            historical_opponent = self._sample_historical_opponent()
+
             batches: list[EpisodeBatch] = []
             total_game_length = 0
             for game_offset in range(self.config.self_play_games_per_epoch):
                 game_index = (epoch - 1) * self.config.self_play_games_per_epoch + game_offset + 1
+                use_historical_opponent = (
+                    historical_opponent is not None
+                    and random.random() < self.config.historical_opponent_prob
+                )
+                black_engine = self.engine
+                white_engine = self.engine
+                tracked_players: set[int] | None = None
+                if use_historical_opponent:
+                    if game_offset % 2 == 0:
+                        white_engine = historical_opponent
+                        tracked_players = {1}
+                    else:
+                        black_engine = historical_opponent
+                        tracked_players = {-1}
                 result = play_self_play_game(
                     game=self.game,
-                    engine=self.engine,
+                    black_engine=black_engine,
+                    white_engine=white_engine,
                     run_id=self.artifacts.run_id,
                     game_index=game_index,
                     temperature=temperature,
                     reward_config=self.config.reward,
+                    tracked_players=tracked_players,
                 )
                 batches.append(result.episode)
                 total_game_length += result.record.total_moves
@@ -109,13 +128,22 @@ class PPOTrainer:
                         eval_win_rate_heuristic=eval_result.win_rate_heuristic,
                     )
                 )
+            self._remember_current_policy()
             LOGGER.info(
-                "epoch=%s policy_loss=%.4f value_loss=%.4f eval_random=%.2f eval_heuristic=%.2f",
+                (
+                    "epoch=%s policy_loss=%.4f value_loss=%.4f "
+                    "eval_random=%.2f (b=%.2f w=%.2f) "
+                    "eval_heuristic=%.2f (b=%.2f w=%.2f)"
+                ),
                 epoch,
                 metric_record.policy_loss,
                 metric_record.value_loss,
                 metric_record.eval_win_rate_random,
+                eval_result.win_rate_random_black,
+                eval_result.win_rate_random_white,
                 metric_record.eval_win_rate_heuristic,
+                eval_result.win_rate_heuristic_black,
+                eval_result.win_rate_heuristic_white,
             )
 
     def _flatten_batches(self, episodes: list[EpisodeBatch]) -> TrainingBatch:
@@ -166,9 +194,14 @@ class PPOTrainer:
                 if hasattr(self.config, key):
                     setattr(self.config, key, value)
         
+        self.model.eval()
         logger.info(f"Checkpoint loaded successfully")
 
     def _update_policy(self, batch: TrainingBatch):
+        if batch.states.size(0) == 0:
+            return _LossStats(policy_loss=0.0, value_loss=0.0, entropy=0.0)
+
+        self.model.train()
         advantages = batch.advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         loss_stats = _LossStats(policy_loss=0.0, value_loss=0.0, entropy=0.0)
@@ -214,7 +247,36 @@ class PPOTrainer:
         loss_stats.policy_loss /= denominator
         loss_stats.value_loss /= denominator
         loss_stats.entropy /= denominator
+        self.model.eval()
         return loss_stats
+
+    def _build_engine_from_state_dict(self, state_dict: dict[str, torch.Tensor]) -> ModelAIEngine:
+        opponent_model = PolicyValueNet(
+            board_size=self.config.board_size,
+            channels=self.config.model.channels,
+            blocks=self.config.model.blocks,
+        ).to(self.device)
+        opponent_model.load_state_dict(state_dict)
+        return ModelAIEngine(opponent_model, device=self.config.device)
+
+    def _clone_model_state(self) -> dict[str, torch.Tensor]:
+        return {
+            key: value.detach().cpu().clone()
+            for key, value in self.model.state_dict().items()
+        }
+
+    def _remember_current_policy(self) -> None:
+        if self.config.opponent_pool_size <= 0:
+            return
+        self.historical_opponent_snapshots.append(self._clone_model_state())
+        if len(self.historical_opponent_snapshots) > self.config.opponent_pool_size:
+            self.historical_opponent_snapshots.pop(0)
+
+    def _sample_historical_opponent(self) -> ModelAIEngine | None:
+        if not self.historical_opponent_snapshots:
+            return None
+        snapshot = random.choice(self.historical_opponent_snapshots)
+        return self._build_engine_from_state_dict(snapshot)
 
 
 @dataclass(slots=True)

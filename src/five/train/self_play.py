@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from five.ai.encoder import encode_state
-from five.ai.inference import ModelAIEngine
+from five.ai.interfaces import AIEngine
 from five.ai.interfaces import AnalysisResult
 from five.common.config import RewardConfig
 from five.core.game import GomokuGame
@@ -53,47 +53,61 @@ def _apply_hybrid_rewards(
             details.append(RewardDetail(amount=tail_bonus.amount, reason=tail_bonus.reason))
 
         reward_results.append((transition.reward, details))
-        transition.done = True
+        transition.done = False
+    if episode.transitions:
+        episode.transitions[-1].done = True
     return reward_results
 
 
 def play_self_play_game(
     game: GomokuGame,
-    engine: ModelAIEngine,
+    black_engine: AIEngine,
     run_id: str,
     game_index: int,
     checkpoint_name: str | None = None,
     temperature: float = 1.0,
     reward_config: RewardConfig | None = None,
+    white_engine: AIEngine | None = None,
+    tracked_players: set[int] | None = None,
 ) -> SelfPlayResult:
+    if white_engine is None:
+        white_engine = black_engine
+    if tracked_players is None:
+        tracked_players = {1, -1}
+
     state = game.new_game()
     episode = EpisodeBatch()
     moves: list[MoveRecord] = []
     while not state.is_terminal:
+        acting_player = state.current_player
+        acting_engine = black_engine if acting_player == 1 else white_engine
         encoded = encode_state(state)
-        analysis: AnalysisResult = engine.select_move(state, temperature=temperature)
+        analysis: AnalysisResult = acting_engine.select_move(state, temperature=temperature)
         move = analysis.action
         action_index = move.to_index(state.board.size)
         log_prob = float(torch.log(torch.tensor(max(analysis.action_probability, 1e-8))).item())
         board_before = state.board.copy()
-        episode.add(
-            Transition(
-                state=encoded,
-                action=action_index,
-                old_log_prob=log_prob,
-                reward=0.0,
-                done=False,
-                value=analysis.value_estimate,
-                player=state.current_player,
-                legal_mask=torch.from_numpy(state.legal_mask()),
-                board_before=board_before,
-                move=move,
+        move_record_index = len(moves)
+        if acting_player in tracked_players:
+            episode.add(
+                Transition(
+                    state=encoded,
+                    action=action_index,
+                    old_log_prob=log_prob,
+                    reward=0.0,
+                    done=False,
+                    value=analysis.value_estimate,
+                    player=acting_player,
+                    legal_mask=torch.from_numpy(state.legal_mask()),
+                    board_before=board_before,
+                    move=move,
+                    move_record_index=move_record_index,
+                )
             )
-        )
         moves.append(
             MoveRecord(
-                move_index=len(moves) + 1,
-                player=state.current_player,
+                move_index=move_record_index + 1,
+                player=acting_player,
                 row=move.row,
                 col=move.col,
                 action_probability=analysis.action_probability,
@@ -114,10 +128,12 @@ def play_self_play_game(
         state.apply_move(move)
 
     reward_results = _apply_hybrid_rewards(episode, state.winner, reward_config)
-    for idx, (total_reward, details) in enumerate(reward_results):
-        if idx < len(moves):
-            moves[idx].total_reward = total_reward
-            moves[idx].reward_details = details
+    for transition, (total_reward, details) in zip(episode.transitions, reward_results):
+        if transition.move_record_index is None:
+            continue
+        if transition.move_record_index < len(moves):
+            moves[transition.move_record_index].total_reward = total_reward
+            moves[transition.move_record_index].reward_details = details
     result = "draw" if state.winner == 0 else "five_in_a_row"
     record = GameRecord(
         game_id=f"game_{game_index:06d}",
