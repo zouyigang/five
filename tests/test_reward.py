@@ -219,7 +219,7 @@ def test_delaying_open_four_gives_small_positive_credit_without_counting_as_full
     assert result.total_reward < 0
 
 
-def test_missing_opponent_rush_four_outweighs_non_terminal_open_four_gain():
+def test_missing_opponent_rush_four_penalised_alongside_open_four_gain():
     board = _place(
         Board(size=9, win_length=5),
         [
@@ -240,7 +240,10 @@ def test_missing_opponent_rush_four_outweighs_non_terminal_open_four_gain():
 
     assert any("形成活四" in detail.reason for detail in result.details)
     assert any("未化解对方冲四/跳四" in detail.reason for detail in result.details)
-    assert result.total_reward < 0
+    attack = sum(d.amount for d in result.details if d.amount > 0)
+    penalty = sum(d.amount for d in result.details if d.amount < 0)
+    assert attack > 0
+    assert penalty < 0
 
 
 def test_double_three_uses_primary_shape_reward_without_open_three_stacking():

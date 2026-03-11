@@ -31,6 +31,7 @@ class TrainingBatch:
     returns: torch.Tensor
     advantages: torch.Tensor
     legal_masks: torch.Tensor
+    old_values: torch.Tensor
 
     @property
     def return_mean(self) -> float:
@@ -56,20 +57,30 @@ class PPOTrainer:
             blocks=config.model.blocks,
         ).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.learning_rate)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=config.epochs, eta_min=config.lr_min,
+        )
         self.engine = ModelAIEngine(self.model, device=config.device)
         self.artifacts: RunArtifacts = create_run(config)
         self.historical_opponent_snapshots: list[dict[str, torch.Tensor]] = []
-        
-        # Load checkpoint if provided
+        self._epoch_counter: int = 0
+
         if checkpoint_path:
             self._load_checkpoint(checkpoint_path)
 
+    def _get_temperature(self, epoch: int) -> float:
+        anneal_end = int(self.config.epochs * self.config.temperature_anneal_fraction)
+        if epoch >= anneal_end:
+            return self.config.temperature_min
+        progress = epoch / max(anneal_end, 1)
+        return self.config.temperature_init - (self.config.temperature_init - self.config.temperature_min) * progress
+
     def train(self) -> None:
-        for epoch in range(1, self.config.epochs + 1):
+        start_epoch = getattr(self, "_start_epoch", 1)
+        for epoch in range(start_epoch, self.config.epochs + 1):
+            self._epoch_counter = epoch
             self.model.eval()
-            # Temperature annealing: 从1.0降到0.3
-            progress = min(epoch / self.config.epochs, 1.0)
-            temperature = 1.0 - (1.0 - 0.3) * progress
+            temperature = self._get_temperature(epoch)
             historical_opponent = self._sample_historical_opponent()
 
             batches: list[EpisodeBatch] = []
@@ -144,7 +155,8 @@ class PPOTrainer:
                         eval_win_rate_heuristic=eval_result.win_rate_heuristic,
                     )
                 )
-            self._remember_current_policy()
+            self.scheduler.step()
+            self._remember_current_policy(epoch)
             LOGGER.info(
                 (
                     "epoch=%s policy_loss=%.4f value_loss=%.4f "
@@ -176,6 +188,7 @@ class PPOTrainer:
         returns = []
         advantages = []
         legal_masks = []
+        old_values = []
         for episode in episodes:
             episode_returns, episode_advantages = episode.compute_returns_and_advantages(
                 gamma=self.config.gamma,
@@ -188,29 +201,29 @@ class PPOTrainer:
                 returns.append(float(episode_returns[index].item()))
                 advantages.append(float(episode_advantages[index].item()))
                 legal_masks.append(transition.legal_mask)
+                old_values.append(transition.value)
+        raw_returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
+        ret_mean = raw_returns.mean()
+        ret_std = raw_returns.std() + 1e-8
+        normalized_returns = (raw_returns - ret_mean) / ret_std
+        normalized_returns = normalized_returns.clamp(-1.0, 1.0)
         return TrainingBatch(
             states=torch.stack(states).to(self.device),
             actions=torch.tensor(actions, dtype=torch.long, device=self.device),
             old_log_probs=torch.tensor(old_log_probs, dtype=torch.float32, device=self.device),
-            returns=torch.tensor(returns, dtype=torch.float32, device=self.device),
+            returns=normalized_returns,
             advantages=torch.tensor(advantages, dtype=torch.float32, device=self.device),
             legal_masks=torch.stack(legal_masks).to(self.device),
+            old_values=torch.tensor(old_values, dtype=torch.float32, device=self.device),
         )
 
     def _load_checkpoint(self, checkpoint_path: str) -> None:
-        """Load model and optimizer state from checkpoint."""
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
-        # Load model state
+        LOGGER.info("Loading checkpoint from %s", checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
         self.model.load_state_dict(checkpoint["model_state"])
-        
-        # Load optimizer state
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
-        
-        # Update config if present (nested model/reward must be restored as dataclasses)
+
         if "config" in checkpoint:
             saved = checkpoint["config"]
             for key, value in saved.items():
@@ -224,9 +237,11 @@ class PPOTrainer:
                     setattr(self.config, key, RewardConfig(**subset))
                 else:
                     setattr(self.config, key, value)
-        # Resume epoch count
+
         self._start_epoch = int(checkpoint.get("epoch", 0)) + 1
-        logger.info("Checkpoint loaded successfully, resuming from epoch %s", self._start_epoch)
+        for _ in range(self._start_epoch - 1):
+            self.scheduler.step()
+        LOGGER.info("Checkpoint loaded, resuming from epoch %s", self._start_epoch)
         self.model.eval()
 
     def _update_policy(self, batch: TrainingBatch):
@@ -238,6 +253,7 @@ class PPOTrainer:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         loss_stats = _LossStats(policy_loss=0.0, value_loss=0.0, entropy=0.0, grad_norm=0.0)
         sample_count = batch.states.size(0)
+        num_batches = 0
         for _ in range(self.config.updates_per_epoch):
             permutation = torch.randperm(sample_count, device=self.device)
             for start in range(0, sample_count, self.config.batch_size):
@@ -248,6 +264,7 @@ class PPOTrainer:
                 returns = batch.returns[batch_indices]
                 batch_advantages = advantages[batch_indices]
                 legal_masks = batch.legal_masks[batch_indices]
+                batch_old_values = batch.old_values[batch_indices]
 
                 logits, values = self.model(states)
                 masked_logits = logits.masked_fill(legal_masks == 0, -1e9)
@@ -262,7 +279,16 @@ class PPOTrainer:
                     1.0 + self.config.clip_epsilon,
                 ) * batch_advantages
                 policy_loss = -torch.min(unclipped, clipped).mean()
-                value_loss = nn.functional.huber_loss(values, returns, delta=1.0)
+
+                value_clipped = batch_old_values + torch.clamp(
+                    values - batch_old_values,
+                    -self.config.value_clip_epsilon,
+                    self.config.value_clip_epsilon,
+                )
+                value_loss_unclipped = (values - returns) ** 2
+                value_loss_clipped = (value_clipped - returns) ** 2
+                value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
                 entropy = -(probs * log_probs).sum(dim=-1).mean()
                 loss = (
                     policy_loss
@@ -277,11 +303,12 @@ class PPOTrainer:
                 loss_stats.value_loss += float(value_loss.item())
                 loss_stats.entropy += float(entropy.item())
                 loss_stats.grad_norm += float(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
-        denominator = self.config.updates_per_epoch * max(sample_count // self.config.batch_size, 1)
-        loss_stats.policy_loss /= denominator
-        loss_stats.value_loss /= denominator
-        loss_stats.entropy /= denominator
-        loss_stats.grad_norm /= denominator
+                num_batches += 1
+        if num_batches > 0:
+            loss_stats.policy_loss /= num_batches
+            loss_stats.value_loss /= num_batches
+            loss_stats.entropy /= num_batches
+            loss_stats.grad_norm /= num_batches
         self.model.eval()
         return loss_stats
 
@@ -300,8 +327,10 @@ class PPOTrainer:
             for key, value in self.model.state_dict().items()
         }
 
-    def _remember_current_policy(self) -> None:
+    def _remember_current_policy(self, epoch: int) -> None:
         if self.config.opponent_pool_size <= 0:
+            return
+        if epoch % self.config.opponent_snapshot_interval != 0:
             return
         self.historical_opponent_snapshots.append(self._clone_model_state())
         if len(self.historical_opponent_snapshots) > self.config.opponent_pool_size:

@@ -7,21 +7,21 @@ from pathlib import Path
 
 @dataclass(slots=True)
 class RewardConfig:
-    attack_scale: float = 0.02
-    block_scale: float = 0.018
+    attack_scale: float = 0.03
+    block_scale: float = 0.025
     max_process_reward: float = 1.5
-    max_total_reward: float = 2.5
-    opening_position_horizon: int = 20
-    opening_center_bonus: float = 0.12
-    opening_edge_penalty: float = 0.18
-    opening_corner_penalty: float = 0.35
+    max_total_reward: float = 4.0
+    opening_position_horizon: int = 12
+    opening_center_bonus: float = 0.08
+    opening_edge_penalty: float = 0.12
+    opening_corner_penalty: float = 0.25
     opening_center_radius_ratio: float = 0.22
 
-    final_win_reward: float = 1.0
+    final_win_reward: float = 3.0
     draw_reward: float = 0.0
-    outcome_tail_bonus: float = 0.35
-    outcome_decay: float = 0.9
-    outcome_horizon: int = 8
+    outcome_tail_bonus: float = 0.5
+    outcome_decay: float = 0.92
+    outcome_horizon: int = 12
 
     immediate_win_score: float = 100.0
     open_four_score: float = 45.0
@@ -33,15 +33,15 @@ class RewardConfig:
     jump_open_three_score: float = 7.0
     sleep_three_score: float = 3.0
 
-    miss_immediate_win_penalty: float = 1.5
-    miss_own_immediate_win_penalty: float = 2.0
-    delay_open_four_reward: float = 0.08
-    miss_open_four_penalty: float = 1.7
-    miss_four_three_penalty: float = 0.9
-    miss_double_three_penalty: float = 0.9
-    miss_rush_four_penalty: float = 1.1
-    miss_open_three_penalty: float = 0.25
-    miss_jump_open_three_penalty: float = 0.15
+    miss_immediate_win_penalty: float = 0.6
+    miss_own_immediate_win_penalty: float = 0.8
+    delay_open_four_reward: float = 0.1
+    miss_open_four_penalty: float = 0.6
+    miss_four_three_penalty: float = 0.3
+    miss_double_three_penalty: float = 0.3
+    miss_rush_four_penalty: float = 0.4
+    miss_open_three_penalty: float = 0.1
+    miss_jump_open_three_penalty: float = 0.05
 
 
 @dataclass(slots=True)
@@ -59,17 +59,22 @@ class TrainingConfig:
     self_play_games_per_epoch: int = 128
     epochs: int = 1000
     batch_size: int = 256
-    updates_per_epoch: int = 10
+    updates_per_epoch: int = 4
     learning_rate: float = 2e-4
+    lr_min: float = 1e-5
     grad_clip_norm: float = 1.0
-    gamma: float = 0.99
+    gamma: float = 0.97
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
+    value_clip_epsilon: float = 0.2
     value_coef: float = 0.5
-    entropy_coef: float = 0.02
-    temperature: float = 1.0
+    entropy_coef: float = 0.05
+    temperature_init: float = 1.0
+    temperature_min: float = 0.5
+    temperature_anneal_fraction: float = 0.8
     historical_opponent_prob: float = 0.75
-    opponent_pool_size: int = 16
+    opponent_pool_size: int = 50
+    opponent_snapshot_interval: int = 5
     eval_games: int = 32
     checkpoint_every: int = 1
     device: str = "cuda"
