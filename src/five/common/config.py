@@ -33,15 +33,16 @@ class RewardConfig:
     jump_open_three_score: float = 7.0
     sleep_three_score: float = 3.0
 
-    miss_immediate_win_penalty: float = 0.6
+    miss_immediate_win_penalty: float = 2.0
     miss_own_immediate_win_penalty: float = 0.8
+    miss_own_open_four_penalty: float = 0.7
     delay_open_four_reward: float = 0.1
     miss_open_four_penalty: float = 0.6
     miss_four_three_penalty: float = 0.3
     miss_double_three_penalty: float = 0.3
-    miss_rush_four_penalty: float = 0.4
-    miss_open_three_penalty: float = 0.1
-    miss_jump_open_three_penalty: float = 0.05
+    miss_rush_four_penalty: float = 0.65
+    miss_open_three_penalty: float = 0.35
+    miss_jump_open_three_penalty: float = 0.25
 
 
 @dataclass(slots=True)

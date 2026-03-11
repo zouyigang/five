@@ -47,7 +47,7 @@ def test_blocking_opponent_open_four_is_better_than_ignoring_it():
     assert block_result.total_reward < 0
     assert block_result.total_reward > ignore_result.total_reward
     assert any("延缓对方活四一手" in detail.reason for detail in block_result.details)
-    assert any("未化解对方冲四/跳四" in detail.reason for detail in block_result.details)
+    assert any("堵截活四不彻底仍留冲四" in detail.reason for detail in block_result.details)
     assert not any("封堵对方活四" in detail.reason for detail in block_result.details)
 
 
@@ -66,11 +66,7 @@ def test_missing_opponent_immediate_win_is_penalized():
     result = compute_process_reward_with_details(board, Move(0, 0), 1)
 
     assert result.total_reward < 0
-    assert any(
-        "未化解对方冲四/跳四" in detail.reason or "未阻止对方活四保持双赢点" in detail.reason
-        for detail in result.details
-    )
-    assert not any("未化解对方直接成五点" in detail.reason for detail in result.details)
+    assert any("未阻止对方制胜手" in detail.reason for detail in result.details)
 
 
 def test_no_miss_penalty_for_only_potential_future_threes():
@@ -239,7 +235,7 @@ def test_missing_opponent_rush_four_penalised_alongside_open_four_gain():
     result = compute_process_reward_with_details(board, Move(3, 5), 1)
 
     assert any("形成活四" in detail.reason for detail in result.details)
-    assert any("未化解对方冲四/跳四" in detail.reason for detail in result.details)
+    assert any("未阻止对方制胜手" in detail.reason for detail in result.details)
     attack = sum(d.amount for d in result.details if d.amount > 0)
     penalty = sum(d.amount for d in result.details if d.amount < 0)
     assert attack > 0
@@ -346,6 +342,109 @@ def test_opening_position_reward_can_stack_with_shape_reward():
     assert any("形成活三" in detail.reason for detail in result.details)
     assert any("开局中心落子奖励" == detail.reason for detail in result.details)
     assert result.total_reward > config.opening_center_bonus
+
+
+def test_opening_position_reward_is_suppressed_when_ignoring_opponent_open_three():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (3, 3, 1),
+            (4, 4, -1),
+            (3, 4, 1),
+            (4, 5, -1),
+            (3, 5, 1),
+            (5, 3, -1),
+            (5, 5, 1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(4, 3), -1)
+
+    assert any("形成活三" in detail.reason for detail in result.details)
+    assert any("未压制对方活三" in detail.reason for detail in result.details)
+    assert not any("开局" in detail.reason for detail in result.details)
+    assert result.total_reward < 0
+
+
+def test_opening_position_reward_is_suppressed_in_tactical_blocking_positions():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 4, 1),
+            (3, 4, -1),
+            (5, 4, 1),
+            (3, 5, -1),
+            (6, 4, 1),
+            (3, 6, -1),
+            (7, 4, 1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(8, 4), -1)
+
+    assert any("封堵对方冲四/跳四" in detail.reason for detail in result.details)
+    assert not any("开局" in detail.reason for detail in result.details)
+
+
+def test_miss_own_open_four_penalty_triggers_when_no_opponent_threat():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (3, 3, 1),
+            (4, 4, -1),
+            (3, 4, 1),
+            (4, 5, -1),
+            (3, 5, 1),
+            (4, 2, -1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(4, 6), 1)
+
+    assert any("错失形成活四/必胜棋型" in detail.reason for detail in result.details)
+    assert result.total_reward < 0
+
+
+def test_miss_own_open_four_penalty_suppressed_when_opponent_has_winning_move():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (3, 3, 1),
+            (3, 4, 1),
+            (3, 5, 1),
+            (0, 0, -1),
+            (0, 1, -1),
+            (0, 2, -1),
+            (0, 3, -1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(0, 4), 1)
+
+    assert any("封堵对方冲四/跳四" in detail.reason for detail in result.details)
+    assert not any("错失形成活四" in detail.reason for detail in result.details)
+    assert result.total_reward > 0
+
+
+def test_forming_own_open_four_when_opponent_has_winning_move_is_negative():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (3, 3, 1),
+            (3, 4, 1),
+            (3, 5, 1),
+            (0, 0, -1),
+            (0, 1, -1),
+            (0, 2, -1),
+            (0, 3, -1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(3, 6), 1)
+
+    assert any("形成活四" in detail.reason for detail in result.details)
+    assert any("未阻止对方制胜手" in detail.reason for detail in result.details)
+    assert result.total_reward < 0
 
 
 def test_self_play_rewards_use_terminal_tail_instead_of_uniform_winner_bonus():

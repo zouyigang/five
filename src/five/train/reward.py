@@ -539,6 +539,20 @@ def _scan_existing_threat_inventory(board: Board, player: int) -> ThreatInventor
     return inventory
 
 
+def _has_tactical_threat(inventory: ThreatInventory) -> bool:
+    return any(
+        (
+            inventory.immediate_win,
+            inventory.open_four,
+            inventory.rush_four,
+            inventory.four_three,
+            inventory.double_three,
+            inventory.open_three,
+            inventory.jump_open_three,
+        )
+    )
+
+
 def _accumulate_shape_reward(
     details: list[RewardDetail],
     features: ShapeFeatures,
@@ -609,6 +623,19 @@ def _accumulate_miss_penalty(
     after: ThreatInventory,
     config: RewardConfig,
 ) -> float:
+    # Highest priority: opponent had a blockable winning move (e.g. rush four)
+    # and it was not blocked.  An open four has two winning points and cannot
+    # be fully neutralised, so it falls through to the normal penalty logic
+    # which still allows credit for partial blocking.
+    if (
+        before.immediate_win > 0
+        and after.immediate_win > 0
+        and before.open_four == 0
+    ):
+        amount = -config.miss_immediate_win_penalty
+        details.append(RewardDetail(amount=amount, reason="未阻止对方制胜手"))
+        return amount
+
     penalties = (
         ("open_four", config.miss_open_four_penalty, "未阻止对方活四保持双赢点"),
         ("rush_four", config.miss_rush_four_penalty, "未化解对方冲四/跳四"),
@@ -624,11 +651,13 @@ def _accumulate_miss_penalty(
         details.append(RewardDetail(amount=amount, reason=f"{reason} x{unresolved}"))
         total_penalty += amount
 
-    # Blocking one end of an open four still leaves a one-move loss on the other end.
-    downgraded_open_four = min(before.open_four, after.rush_four)
+    # Blocking one end of an open four still leaves a rush-four on the other end.
+    disappeared_open_four = max(0, before.open_four - after.open_four)
+    newly_appeared_rush_four = max(0, after.rush_four - before.rush_four)
+    downgraded_open_four = min(disappeared_open_four, newly_appeared_rush_four)
     if downgraded_open_four > 0:
         amount = -config.miss_rush_four_penalty * downgraded_open_four
-        details.append(RewardDetail(amount=amount, reason=f"未化解对方冲四/跳四 x{downgraded_open_four}"))
+        details.append(RewardDetail(amount=amount, reason=f"堵截活四不彻底仍留冲四 x{downgraded_open_four}"))
         total_penalty += amount
     return total_penalty
 
@@ -640,21 +669,53 @@ def _is_winning_move(board: Board, move: Move, player: int) -> bool:
     return winner == player
 
 
+def _find_own_open_four_moves(board: Board, player: int) -> list[Move]:
+    """Find moves that would create an open four (or better) for the player."""
+    results = []
+    for move in board.legal_moves():
+        features = _evaluate_move_features(board, move, player)
+        if features.open_four > 0 or features.double_four > 0 or features.four_three > 0:
+            results.append(move)
+    return results
+
+
 def _accumulate_missed_own_win_penalty(
     details: list[RewardDetail],
     board: Board,
     move: Move,
     player: int,
     config: RewardConfig,
+    opponent_before: ThreatInventory | None = None,
 ) -> float:
     winning_moves = find_winning_moves(board, player)
-    if not winning_moves:
-        return 0.0
-    if move in winning_moves:
+    if winning_moves:
+        if move in winning_moves:
+            return 0.0
+        amount = -config.miss_own_immediate_win_penalty
+        details.append(RewardDetail(amount=amount, reason="错失直接获胜落点"))
+        return amount
+
+    # When the opponent has an immediate winning move, forming our own open
+    # four is useless — the opponent wins before we can use it.  The correct
+    # play is to block, so don't penalise for "missing" an own open four.
+    if opponent_before is not None and opponent_before.immediate_win > 0:
         return 0.0
 
-    amount = -config.miss_own_immediate_win_penalty
-    details.append(RewardDetail(amount=amount, reason="错失直接获胜落点"))
+    my_features = _evaluate_move_features(board, move, player)
+    move_forms_open_four = (
+        my_features.open_four > 0
+        or my_features.double_four > 0
+        or my_features.four_three > 0
+    )
+    if move_forms_open_four:
+        return 0.0
+
+    open_four_moves = _find_own_open_four_moves(board, player)
+    if not open_four_moves:
+        return 0.0
+
+    amount = -config.miss_own_open_four_penalty
+    details.append(RewardDetail(amount=amount, reason="错失形成活四/必胜棋型"))
     return amount
 
 
@@ -750,8 +811,18 @@ def compute_process_reward_with_details(
     miss_penalty = 0.0
     if not is_winning_move:
         miss_penalty = _accumulate_miss_penalty(details, opponent_before, opponent_after, config)
-    missed_own_win_penalty = _accumulate_missed_own_win_penalty(details, board, move, player, config)
-    opening_position_reward = _accumulate_opening_position_reward(details, board, move, config)
+    missed_own_win_penalty = _accumulate_missed_own_win_penalty(details, board, move, player, config, opponent_before)
+    opening_position_reward = 0.0
+    # Opening heuristics are only useful in quiet positions. When there is an
+    # urgent tactical threat on the board, they should not dilute a defensive
+    # penalty or punish a necessary edge/blocking move.
+    if (
+        not is_winning_move
+        and miss_penalty == 0.0
+        and missed_own_win_penalty == 0.0
+        and not _has_tactical_threat(opponent_before)
+    ):
+        opening_position_reward = _accumulate_opening_position_reward(details, board, move, config)
 
     total_reward = attack_reward + block_reward + miss_penalty + missed_own_win_penalty + opening_position_reward
     clipped_reward = _clip(total_reward, -config.max_process_reward, config.max_process_reward)
