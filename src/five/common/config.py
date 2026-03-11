@@ -11,11 +11,11 @@ class RewardConfig:
     block_scale: float = 0.018
     max_process_reward: float = 1.5
     max_total_reward: float = 2.5
-    opening_position_horizon: int = 12
-    opening_center_bonus: float = 0.08
-    opening_edge_penalty: float = 0.08
-    opening_corner_penalty: float = 0.18
-    opening_center_radius_ratio: float = 0.18
+    opening_position_horizon: int = 20
+    opening_center_bonus: float = 0.12
+    opening_edge_penalty: float = 0.18
+    opening_corner_penalty: float = 0.35
+    opening_center_radius_ratio: float = 0.22
 
     final_win_reward: float = 1.0
     draw_reward: float = 0.0
@@ -61,15 +61,16 @@ class TrainingConfig:
     batch_size: int = 256
     updates_per_epoch: int = 10
     learning_rate: float = 2e-4
+    grad_clip_norm: float = 1.0
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
     value_coef: float = 0.5
     entropy_coef: float = 0.02
     temperature: float = 1.0
-    historical_opponent_prob: float = 0.5
-    opponent_pool_size: int = 4
-    eval_games: int = 8
+    historical_opponent_prob: float = 0.75
+    opponent_pool_size: int = 16
+    eval_games: int = 32
     checkpoint_every: int = 1
     device: str = "cuda"
     runs_dir: str = "runs"

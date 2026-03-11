@@ -14,7 +14,9 @@ class MetricStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         ensure_dir(path.parent)
-        self.fieldnames = list(asdict(MetricRecord(0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)).keys())
+        self.fieldnames = list(
+            asdict(MetricRecord(0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)).keys()
+        )
         if not self.path.exists():
             with self.path.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=self.fieldnames)
@@ -28,4 +30,8 @@ class MetricStore:
     def read_frame(self) -> pd.DataFrame:
         if not self.path.exists():
             return pd.DataFrame(columns=self.fieldnames)
-        return pd.read_csv(self.path)
+        frame = pd.read_csv(self.path)
+        for fieldname in self.fieldnames:
+            if fieldname not in frame.columns:
+                frame[fieldname] = pd.NA
+        return frame[self.fieldnames]

@@ -32,6 +32,18 @@ class TrainingBatch:
     advantages: torch.Tensor
     legal_masks: torch.Tensor
 
+    @property
+    def return_mean(self) -> float:
+        return float(self.returns.mean().item()) if self.returns.numel() else 0.0
+
+    @property
+    def return_std(self) -> float:
+        return float(self.returns.std(unbiased=False).item()) if self.returns.numel() else 0.0
+
+    @property
+    def return_abs_max(self) -> float:
+        return float(self.returns.abs().max().item()) if self.returns.numel() else 0.0
+
 
 class PPOTrainer:
     def __init__(self, config: TrainingConfig, checkpoint_path: str | None = None) -> None:
@@ -103,6 +115,10 @@ class PPOTrainer:
                 policy_loss=stats.policy_loss,
                 value_loss=stats.value_loss,
                 entropy=stats.entropy,
+                grad_norm=stats.grad_norm,
+                return_mean=training_batch.return_mean,
+                return_std=training_batch.return_std,
+                return_abs_max=training_batch.return_abs_max,
                 avg_game_length=total_game_length / max(len(batches), 1),
                 eval_win_rate_random=eval_result.win_rate_random,
                 eval_win_rate_heuristic=eval_result.win_rate_heuristic,
@@ -132,12 +148,19 @@ class PPOTrainer:
             LOGGER.info(
                 (
                     "epoch=%s policy_loss=%.4f value_loss=%.4f "
+                    "entropy=%.4f grad_norm=%.4f "
+                    "return_mean=%.4f return_std=%.4f return_abs_max=%.4f "
                     "eval_random=%.2f (b=%.2f w=%.2f) "
                     "eval_heuristic=%.2f (b=%.2f w=%.2f)"
                 ),
                 epoch,
                 metric_record.policy_loss,
                 metric_record.value_loss,
+                metric_record.entropy,
+                metric_record.grad_norm,
+                metric_record.return_mean,
+                metric_record.return_std,
+                metric_record.return_abs_max,
                 metric_record.eval_win_rate_random,
                 eval_result.win_rate_random_black,
                 eval_result.win_rate_random_white,
@@ -208,12 +231,12 @@ class PPOTrainer:
 
     def _update_policy(self, batch: TrainingBatch):
         if batch.states.size(0) == 0:
-            return _LossStats(policy_loss=0.0, value_loss=0.0, entropy=0.0)
+            return _LossStats(policy_loss=0.0, value_loss=0.0, entropy=0.0, grad_norm=0.0)
 
         self.model.train()
         advantages = batch.advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        loss_stats = _LossStats(policy_loss=0.0, value_loss=0.0, entropy=0.0)
+        loss_stats = _LossStats(policy_loss=0.0, value_loss=0.0, entropy=0.0, grad_norm=0.0)
         sample_count = batch.states.size(0)
         for _ in range(self.config.updates_per_epoch):
             permutation = torch.randperm(sample_count, device=self.device)
@@ -239,7 +262,7 @@ class PPOTrainer:
                     1.0 + self.config.clip_epsilon,
                 ) * batch_advantages
                 policy_loss = -torch.min(unclipped, clipped).mean()
-                value_loss = nn.functional.mse_loss(values, returns)
+                value_loss = nn.functional.huber_loss(values, returns, delta=1.0)
                 entropy = -(probs * log_probs).sum(dim=-1).mean()
                 loss = (
                     policy_loss
@@ -248,14 +271,17 @@ class PPOTrainer:
                 )
                 self.optimizer.zero_grad()
                 loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
                 self.optimizer.step()
                 loss_stats.policy_loss += float(policy_loss.item())
                 loss_stats.value_loss += float(value_loss.item())
                 loss_stats.entropy += float(entropy.item())
+                loss_stats.grad_norm += float(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
         denominator = self.config.updates_per_epoch * max(sample_count // self.config.batch_size, 1)
         loss_stats.policy_loss /= denominator
         loss_stats.value_loss /= denominator
         loss_stats.entropy /= denominator
+        loss_stats.grad_norm /= denominator
         self.model.eval()
         return loss_stats
 
@@ -293,6 +319,7 @@ class _LossStats:
     policy_loss: float
     value_loss: float
     entropy: float
+    grad_norm: float
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

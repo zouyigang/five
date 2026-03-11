@@ -44,7 +44,6 @@ class PolicyValueNet(nn.Module):
             nn.Linear(board_size * board_size, channels),
             nn.ReLU(),
             nn.Linear(channels, 1),
-            nn.Tanh(),
         )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

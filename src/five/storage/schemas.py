@@ -57,6 +57,10 @@ class MetricRecord:
     policy_loss: float
     value_loss: float
     entropy: float
+    grad_norm: float
+    return_mean: float
+    return_std: float
+    return_abs_max: float
     avg_game_length: float
     eval_win_rate_random: float
     eval_win_rate_heuristic: float

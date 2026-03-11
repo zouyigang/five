@@ -479,24 +479,20 @@ def _extract_shape_features(threat: ThreatInfo) -> ShapeFeatures:
 
 
 def _primary_category(features: ShapeFeatures) -> str | None:
-    if features.five:
-        return "immediate_win"
-    if features.open_four:
-        return "open_four"
-    if features.double_four:
-        return "double_four"
-    if features.four_three:
-        return "four_three"
-    if features.double_three:
-        return "double_three"
-    if features.rush_four:
-        return "rush_four"
-    if features.open_three:
-        return "open_three"
-    if features.jump_open_three:
-        return "jump_open_three"
-    if features.sleep_three:
-        return "sleep_three"
+    counts = {
+        "immediate_win": features.five,
+        "double_four": features.double_four,
+        "open_four": features.open_four,
+        "four_three": features.four_three,
+        "double_three": features.double_three,
+        "rush_four": features.rush_four,
+        "open_three": features.open_three,
+        "jump_open_three": features.jump_open_three,
+        "sleep_three": features.sleep_three,
+    }
+    for category in PRIMARY_CATEGORY_ORDER:
+        if counts[category] > 0:
+            return category
     return None
 
 
