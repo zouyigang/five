@@ -9,6 +9,7 @@ from torch import nn
 
 from five.ai.inference import ModelAIEngine
 from five.ai.model import PolicyValueNet
+from five.ai.players import HeuristicPlayer
 from five.common.config import ModelConfig, RewardConfig, TrainingConfig
 from five.common.logging import configure_logging, get_logger
 from five.common.utils import set_seed
@@ -32,18 +33,9 @@ class TrainingBatch:
     advantages: torch.Tensor
     legal_masks: torch.Tensor
     old_values: torch.Tensor
-
-    @property
-    def return_mean(self) -> float:
-        return float(self.returns.mean().item()) if self.returns.numel() else 0.0
-
-    @property
-    def return_std(self) -> float:
-        return float(self.returns.std(unbiased=False).item()) if self.returns.numel() else 0.0
-
-    @property
-    def return_abs_max(self) -> float:
-        return float(self.returns.abs().max().item()) if self.returns.numel() else 0.0
+    raw_return_mean: float = 0.0
+    raw_return_std: float = 0.0
+    raw_return_abs_max: float = 0.0
 
 
 class PPOTrainer:
@@ -68,6 +60,16 @@ class PPOTrainer:
         if checkpoint_path:
             self._load_checkpoint(checkpoint_path)
 
+    def _get_heuristic_prob(self, epoch: int) -> float:
+        start_epoch = int(self.config.epochs * self.config.heuristic_start_fraction)
+        ramp_epoch = int(self.config.epochs * self.config.heuristic_ramp_fraction)
+        if epoch < start_epoch:
+            return 0.0
+        if ramp_epoch <= start_epoch:
+            return self.config.heuristic_opponent_max_prob
+        progress = min((epoch - start_epoch) / (ramp_epoch - start_epoch), 1.0)
+        return self.config.heuristic_opponent_max_prob * progress
+
     def _get_temperature(self, epoch: int) -> float:
         anneal_end = int(self.config.epochs * self.config.temperature_anneal_fraction)
         if epoch >= anneal_end:
@@ -81,20 +83,29 @@ class PPOTrainer:
             self._epoch_counter = epoch
             self.model.eval()
             temperature = self._get_temperature(epoch)
+            heuristic_prob = self._get_heuristic_prob(epoch)
             historical_opponent = self._sample_historical_opponent()
+            heuristic_opponent = HeuristicPlayer()
 
             batches: list[EpisodeBatch] = []
             total_game_length = 0
             for game_offset in range(self.config.self_play_games_per_epoch):
                 game_index = (epoch - 1) * self.config.self_play_games_per_epoch + game_offset + 1
-                use_historical_opponent = (
-                    historical_opponent is not None
-                    and random.random() < self.config.historical_opponent_prob
-                )
                 black_engine = self.engine
                 white_engine = self.engine
                 tracked_players: set[int] | None = None
-                if use_historical_opponent:
+                roll = random.random()
+                if roll < heuristic_prob:
+                    if game_offset % 2 == 0:
+                        white_engine = heuristic_opponent
+                        tracked_players = {1}
+                    else:
+                        black_engine = heuristic_opponent
+                        tracked_players = {-1}
+                elif (
+                    historical_opponent is not None
+                    and roll < heuristic_prob + self.config.historical_opponent_prob
+                ):
                     if game_offset % 2 == 0:
                         white_engine = historical_opponent
                         tracked_players = {1}
@@ -127,9 +138,9 @@ class PPOTrainer:
                 value_loss=stats.value_loss,
                 entropy=stats.entropy,
                 grad_norm=stats.grad_norm,
-                return_mean=training_batch.return_mean,
-                return_std=training_batch.return_std,
-                return_abs_max=training_batch.return_abs_max,
+                return_mean=training_batch.raw_return_mean,
+                return_std=training_batch.raw_return_std,
+                return_abs_max=training_batch.raw_return_abs_max,
                 avg_game_length=total_game_length / max(len(batches), 1),
                 eval_win_rate_random=eval_result.win_rate_random,
                 eval_win_rate_heuristic=eval_result.win_rate_heuristic,
@@ -203,9 +214,11 @@ class PPOTrainer:
                 legal_masks.append(transition.legal_mask)
                 old_values.append(transition.value)
         raw_returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
-        ret_mean = raw_returns.mean()
+        raw_mean = float(raw_returns.mean().item()) if raw_returns.numel() else 0.0
+        raw_std = float(raw_returns.std(unbiased=False).item()) if raw_returns.numel() else 0.0
+        raw_abs_max = float(raw_returns.abs().max().item()) if raw_returns.numel() else 0.0
         ret_std = raw_returns.std() + 1e-8
-        normalized_returns = (raw_returns - ret_mean) / ret_std
+        normalized_returns = (raw_returns - raw_returns.mean()) / ret_std
         normalized_returns = normalized_returns.clamp(-1.0, 1.0)
         return TrainingBatch(
             states=torch.stack(states).to(self.device),
@@ -215,6 +228,9 @@ class PPOTrainer:
             advantages=torch.tensor(advantages, dtype=torch.float32, device=self.device),
             legal_masks=torch.stack(legal_masks).to(self.device),
             old_values=torch.tensor(old_values, dtype=torch.float32, device=self.device),
+            raw_return_mean=raw_mean,
+            raw_return_std=raw_std,
+            raw_return_abs_max=raw_abs_max,
         )
 
     def _load_checkpoint(self, checkpoint_path: str) -> None:

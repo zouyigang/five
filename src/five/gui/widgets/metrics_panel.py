@@ -30,26 +30,33 @@ class MetricsPanel(ttk.Frame):
     def _best_epoch(self, frame: pd.DataFrame) -> int | None:
         epoch = self._series(frame, "epoch")
         heuristic = self._series(frame, "eval_win_rate_heuristic")
-        random = self._series(frame, "eval_win_rate_random")
+        random_wr = self._series(frame, "eval_win_rate_random")
         value_loss = self._series(frame, "value_loss")
-        if epoch is None or heuristic is None or random is None or value_loss is None:
+        entropy = self._series(frame, "entropy")
+        avg_length = self._series(frame, "avg_game_length")
+        if epoch is None or heuristic is None or random_wr is None:
             return None
 
-        ranked = pd.DataFrame(
-            {
-                "epoch": epoch,
-                "eval_win_rate_heuristic": heuristic.fillna(-1.0),
-                "eval_win_rate_random": random.fillna(-1.0),
-                "value_loss": value_loss.fillna(float("inf")),
-            }
+        window = self._rolling_window(frame)
+        h_smooth = heuristic.rolling(window=window, min_periods=1).mean().fillna(-1.0)
+        r_smooth = random_wr.rolling(window=window, min_periods=1).mean().fillna(-1.0)
+        vl_smooth = value_loss.rolling(window=window, min_periods=1).mean().fillna(float("inf")) if value_loss is not None else pd.Series([float("inf")] * len(frame))
+        ent = entropy.fillna(0.0) if entropy is not None else pd.Series([0.0] * len(frame))
+        length = avg_length.fillna(81.0) if avg_length is not None else pd.Series([81.0] * len(frame))
+
+        ent_max = max(ent.max(), 1e-8)
+        length_max = max(length.max(), 1.0)
+        vl_max = max(vl_smooth.max(), 1e-8)
+
+        scores = (
+            h_smooth * 4.0
+            + r_smooth * 2.0
+            + (ent / ent_max) * 1.0
+            - (vl_smooth / vl_max) * 0.5
+            - (length / length_max) * 0.5
         )
-        ranked = ranked.sort_values(
-            by=["eval_win_rate_heuristic", "eval_win_rate_random", "value_loss", "epoch"],
-            ascending=[False, False, True, False],
-        )
-        if ranked.empty:
-            return None
-        return int(ranked.iloc[0]["epoch"])
+        best_idx = int(scores.idxmax())
+        return int(epoch.iloc[best_idx])
 
     def _anomaly_epochs(self, frame: pd.DataFrame) -> list[int]:
         epoch = self._series(frame, "epoch")
@@ -58,35 +65,86 @@ class MetricsPanel(ttk.Frame):
 
         scored: dict[int, int] = {}
         window = self._rolling_window(frame)
-        specs = [
+        min_periods = max(3, window // 2)
+
+        def _mark(idx: int, weight: int = 1) -> None:
+            epoch_value = int(epoch.iloc[idx])
+            scored[epoch_value] = scored.get(epoch_value, 0) + weight
+
+        spike_specs = [
             ("value_loss", 2.5),
             ("grad_norm", 2.5),
-            ("return_abs_max", 2.0),
-            ("avg_game_length", 1.8),
+            ("policy_loss", 2.5),
         ]
-        for column, multiplier in specs:
+        for column, multiplier in spike_specs:
             series = self._series(frame, column)
             if series is None:
                 continue
-            baseline = series.rolling(window=window, min_periods=max(3, window // 2)).median()
-            for idx, value in enumerate(series):
+            abs_series = series.abs() if column == "policy_loss" else series
+            baseline = abs_series.rolling(window=window, min_periods=min_periods).median()
+            for idx in range(len(abs_series)):
+                value = abs_series.iloc[idx]
+                base = baseline.iloc[idx]
+                if pd.isna(value) or pd.isna(base) or base <= 1e-9:
+                    continue
+                if value > base * multiplier:
+                    _mark(idx)
+
+        avg_length = self._series(frame, "avg_game_length")
+        if avg_length is not None:
+            baseline = avg_length.rolling(window=window, min_periods=min_periods).median()
+            for idx in range(len(avg_length)):
+                value = avg_length.iloc[idx]
                 base = baseline.iloc[idx]
                 if pd.isna(value) or pd.isna(base) or base <= 0:
                     continue
-                if value > base * multiplier:
-                    epoch_value = int(epoch.iloc[idx])
-                    scored[epoch_value] = scored.get(epoch_value, 0) + 1
+                if value > base * 1.8:
+                    _mark(idx)
+                if value < base * 0.4:
+                    _mark(idx)
 
-        heuristic = self._series(frame, "eval_win_rate_heuristic")
-        if heuristic is not None:
-            baseline = heuristic.rolling(window=window, min_periods=max(3, window // 2)).median()
-            for idx, value in enumerate(heuristic):
+        entropy = self._series(frame, "entropy")
+        if entropy is not None:
+            baseline = entropy.rolling(window=window, min_periods=min_periods).median()
+            for idx in range(len(entropy)):
+                value = entropy.iloc[idx]
+                base = baseline.iloc[idx]
+                if pd.isna(value) or pd.isna(base) or base <= 1e-9:
+                    continue
+                if value < base * 0.4:
+                    _mark(idx, weight=2)
+
+        for wr_col, drop_thresh in [("eval_win_rate_heuristic", 0.35), ("eval_win_rate_random", 0.25)]:
+            wr = self._series(frame, wr_col)
+            if wr is None:
+                continue
+            baseline = wr.rolling(window=window, min_periods=min_periods).median()
+            for idx in range(len(wr)):
+                value = wr.iloc[idx]
                 base = baseline.iloc[idx]
                 if pd.isna(value) or pd.isna(base):
                     continue
-                if base >= 0.5 and value <= max(0.0, base - 0.4):
-                    epoch_value = int(epoch.iloc[idx])
-                    scored[epoch_value] = scored.get(epoch_value, 0) + 1
+                if base >= 0.3 and value <= max(0.0, base - drop_thresh):
+                    _mark(idx, weight=2)
+
+        trend_window = max(window * 2, 20)
+        for column, direction in [("entropy", "down"), ("eval_win_rate_random", "down"), ("value_loss", "up")]:
+            series = self._series(frame, column)
+            if series is None or len(series) < trend_window:
+                continue
+            for idx in range(trend_window, len(series)):
+                segment = series.iloc[idx - trend_window : idx]
+                if segment.isna().sum() > trend_window // 3:
+                    continue
+                start_val = segment.iloc[: trend_window // 4].mean()
+                end_val = segment.iloc[-(trend_window // 4) :].mean()
+                if pd.isna(start_val) or pd.isna(end_val) or abs(start_val) < 1e-9:
+                    continue
+                change_ratio = (end_val - start_val) / abs(start_val)
+                if direction == "down" and change_ratio < -0.5:
+                    _mark(idx)
+                elif direction == "up" and change_ratio > 1.0:
+                    _mark(idx)
 
         ranked_epochs = sorted(scored.items(), key=lambda item: (-item[1], item[0]))
         return [epoch_value for epoch_value, _ in ranked_epochs[:8]]

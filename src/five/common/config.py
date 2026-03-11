@@ -75,6 +75,9 @@ class TrainingConfig:
     historical_opponent_prob: float = 0.75
     opponent_pool_size: int = 50
     opponent_snapshot_interval: int = 5
+    heuristic_opponent_max_prob: float = 0.25
+    heuristic_start_fraction: float = 0.15
+    heuristic_ramp_fraction: float = 0.5
     eval_games: int = 32
     checkpoint_every: int = 1
     device: str = "cuda"

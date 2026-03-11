@@ -15,7 +15,10 @@ from five.core.state import GameState
 class RandomPlayer:
     name: str = "random"
 
-    def select_move(self, state: GameState) -> AnalysisResult:
+    def load_checkpoint(self, path: str) -> None:
+        pass
+
+    def select_move(self, state: GameState, temperature: float = 0.0) -> AnalysisResult:
         moves = state.legal_moves()
         choice = random.choice(moves)
         probability = 1.0 / len(moves)
@@ -26,6 +29,11 @@ class RandomPlayer:
             value_estimate=0.0,
             candidates=candidates,
         )
+
+    def analyze(self, state: GameState, top_k: int = 5) -> list[CandidateMove]:
+        moves = state.legal_moves()
+        probability = 1.0 / max(len(moves), 1)
+        return [CandidateMove(move=m, score=probability) for m in moves[:top_k]]
 
 
 def _count_line(board: Board, move: Move, player: int, dr: int, dc: int) -> tuple[int, int]:
@@ -76,7 +84,10 @@ def _score_move_for_heuristic(board: Board, move: Move, player: int) -> float:
 class HeuristicPlayer:
     name: str = "heuristic"
 
-    def select_move(self, state: GameState) -> AnalysisResult:
+    def load_checkpoint(self, path: str) -> None:
+        pass
+
+    def select_move(self, state: GameState, temperature: float = 0.0) -> AnalysisResult:
         board = state.board
         player = state.current_player
         legal = state.legal_moves()
@@ -92,6 +103,14 @@ class HeuristicPlayer:
             value_estimate=best_score,
             candidates=candidates,
         )
+
+    def analyze(self, state: GameState, top_k: int = 5) -> list[CandidateMove]:
+        board = state.board
+        player = state.current_player
+        legal = state.legal_moves()
+        scored = [(_score_move_for_heuristic(board, m, player), m) for m in legal]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [CandidateMove(move=m, score=float(s)) for s, m in scored[:top_k]]
 
 
 @dataclass(slots=True)
