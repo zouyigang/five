@@ -10,6 +10,8 @@ from five.core.move import Move
 from five.core.rules import DIRECTIONS, in_bounds
 from five.core.state import GameState
 
+HEURISTIC_CENTER_WEIGHT = 0.35
+
 
 @dataclass(slots=True)
 class RandomPlayer:
@@ -57,7 +59,9 @@ def _score_move_for_heuristic(board: Board, move: Move, player: int) -> float:
     opponent = -player
     center = (board.size - 1) / 2.0
     distance = math.dist((move.row, move.col), (center, center))
-    score += max(0, 5.0 - distance) * 0.5
+    # Keep a mild opening preference for central development without letting
+    # the heuristic opponent dominate the learned position bias.
+    score += max(0, 5.0 - distance) * HEURISTIC_CENTER_WEIGHT
 
     for target, multiplier in [(player, 1.0), (opponent, 0.9)]:
         board.grid[move.row, move.col] = target

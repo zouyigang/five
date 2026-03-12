@@ -64,6 +64,10 @@ class MetricRecord:
     avg_game_length: float
     eval_win_rate_random: float
     eval_win_rate_heuristic: float
+    opening_edge_rate: float = 0.0
+    opening_corner_rate: float = 0.0
+    opening_center_rate: float = 0.0
+    policy_topk_edge_rate: float = 0.0
 
 
 @dataclass(slots=True)

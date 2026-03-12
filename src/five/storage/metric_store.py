@@ -15,7 +15,26 @@ class MetricStore:
         self.path = path
         ensure_dir(path.parent)
         self.fieldnames = list(
-            asdict(MetricRecord(0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)).keys()
+            asdict(
+                MetricRecord(
+                    0,
+                    0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+            ).keys()
         )
         if not self.path.exists():
             with self.path.open("w", encoding="utf-8", newline="") as handle:

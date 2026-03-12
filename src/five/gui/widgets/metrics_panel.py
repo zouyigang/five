@@ -11,8 +11,8 @@ import pandas as pd
 class MetricsPanel(ttk.Frame):
     def __init__(self, master) -> None:
         super().__init__(master)
-        self.figure = Figure(figsize=(9, 10), dpi=100)
-        self.axes = self.figure.subplots(4, 2)
+        self.figure = Figure(figsize=(10, 12), dpi=100)
+        self.axes = self.figure.subplots(5, 2)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -314,6 +314,31 @@ class MetricsPanel(ttk.Frame):
             label="return abs max",
             color="tab:brown",
             log_scale=True,
+            best_epoch=best_epoch,
+            anomaly_epochs=anomaly_epochs,
+        )
+        self._plot_multi_metric(
+            self.axes[4, 0],
+            x,
+            frame,
+            [
+                ("opening_edge_rate", "opening edge", "tab:red"),
+                ("opening_corner_rate", "opening corner", "tab:purple"),
+                ("opening_center_rate", "opening center", "tab:green"),
+            ],
+            "Opening Position Rates",
+            ylim=(0.0, 1.0),
+            best_epoch=best_epoch,
+            anomaly_epochs=anomaly_epochs,
+        )
+        self._plot_metric(
+            self.axes[4, 1],
+            x,
+            self._series(frame, "policy_topk_edge_rate"),
+            "Opening Top-K Edge Rate",
+            label="top-k edge",
+            color="tab:cyan",
+            ylim=(0.0, 1.0),
             best_epoch=best_epoch,
             anomaly_epochs=anomaly_epochs,
         )

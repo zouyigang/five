@@ -18,7 +18,7 @@ from five.storage.schemas import MetricRecord, ModelRecord
 from five.train.dataset import EpisodeBatch
 from five.train.evaluator import evaluate_policy
 from five.train.run_manager import RunArtifacts, create_run
-from five.train.self_play import play_self_play_game
+from five.train.self_play import SelfPlayResult, play_self_play_game
 
 
 LOGGER = get_logger(__name__)
@@ -36,6 +36,40 @@ class TrainingBatch:
     raw_return_mean: float = 0.0
     raw_return_std: float = 0.0
     raw_return_abs_max: float = 0.0
+
+
+@dataclass(slots=True)
+class _PositionMetricTotals:
+    opening_moves: int = 0
+    opening_edges: int = 0
+    opening_corners: int = 0
+    opening_centers: int = 0
+    topk_candidates: int = 0
+    topk_edges: int = 0
+
+    def merge(self, other: "_PositionMetricTotals") -> None:
+        self.opening_moves += other.opening_moves
+        self.opening_edges += other.opening_edges
+        self.opening_corners += other.opening_corners
+        self.opening_centers += other.opening_centers
+        self.topk_candidates += other.topk_candidates
+        self.topk_edges += other.topk_edges
+
+    @property
+    def opening_edge_rate(self) -> float:
+        return self.opening_edges / max(self.opening_moves, 1)
+
+    @property
+    def opening_corner_rate(self) -> float:
+        return self.opening_corners / max(self.opening_moves, 1)
+
+    @property
+    def opening_center_rate(self) -> float:
+        return self.opening_centers / max(self.opening_moves, 1)
+
+    @property
+    def policy_topk_edge_rate(self) -> float:
+        return self.topk_edges / max(self.topk_candidates, 1)
 
 
 class PPOTrainer:
@@ -89,6 +123,7 @@ class PPOTrainer:
 
             batches: list[EpisodeBatch] = []
             total_game_length = 0
+            position_metrics = _PositionMetricTotals()
             for game_offset in range(self.config.self_play_games_per_epoch):
                 game_index = (epoch - 1) * self.config.self_play_games_per_epoch + game_offset + 1
                 black_engine = self.engine
@@ -124,6 +159,7 @@ class PPOTrainer:
                 )
                 batches.append(result.episode)
                 total_game_length += result.record.total_moves
+                position_metrics.merge(self._collect_position_metric_totals(result))
                 # 只保存少量对局到硬盘，减小存储占用。
                 # 这里改为每 1000 局保存一局，其余仅用于训练。
                 if game_index % 1000 == 0:
@@ -144,6 +180,10 @@ class PPOTrainer:
                 avg_game_length=total_game_length / max(len(batches), 1),
                 eval_win_rate_random=eval_result.win_rate_random,
                 eval_win_rate_heuristic=eval_result.win_rate_heuristic,
+                opening_edge_rate=position_metrics.opening_edge_rate,
+                opening_corner_rate=position_metrics.opening_corner_rate,
+                opening_center_rate=position_metrics.opening_center_rate,
+                policy_topk_edge_rate=position_metrics.policy_topk_edge_rate,
             )
             self.artifacts.metric_store.append(metric_record)
             if epoch % self.config.checkpoint_every == 0:
@@ -174,7 +214,8 @@ class PPOTrainer:
                     "entropy=%.4f grad_norm=%.4f "
                     "return_mean=%.4f return_std=%.4f return_abs_max=%.4f "
                     "eval_random=%.2f (b=%.2f w=%.2f) "
-                    "eval_heuristic=%.2f (b=%.2f w=%.2f)"
+                    "eval_heuristic=%.2f (b=%.2f w=%.2f) "
+                    "opening_edge=%.3f opening_corner=%.3f opening_center=%.3f topk_edge=%.3f"
                 ),
                 epoch,
                 metric_record.policy_loss,
@@ -190,7 +231,62 @@ class PPOTrainer:
                 metric_record.eval_win_rate_heuristic,
                 eval_result.win_rate_heuristic_black,
                 eval_result.win_rate_heuristic_white,
+                metric_record.opening_edge_rate,
+                metric_record.opening_corner_rate,
+                metric_record.opening_center_rate,
+                metric_record.policy_topk_edge_rate,
             )
+
+    def _collect_position_metric_totals(self, result: SelfPlayResult) -> _PositionMetricTotals:
+        totals = _PositionMetricTotals()
+        horizon = self.config.reward.opening_position_horizon
+        if horizon <= 0:
+            return totals
+
+        for transition in result.episode.transitions:
+            if transition.move_record_index is None:
+                continue
+            if transition.move_record_index >= len(result.record.moves):
+                continue
+            move_record = result.record.moves[transition.move_record_index]
+            if move_record.move_index > horizon:
+                continue
+
+            totals.opening_moves += 1
+            if self._is_corner(move_record.row, move_record.col):
+                totals.opening_corners += 1
+            elif self._is_edge(move_record.row, move_record.col):
+                totals.opening_edges += 1
+            if self._is_center(move_record.row, move_record.col):
+                totals.opening_centers += 1
+
+            for candidate in move_record.policy_topk:
+                totals.topk_candidates += 1
+                if self._is_border(candidate.row, candidate.col):
+                    totals.topk_edges += 1
+        return totals
+
+    def _is_center(self, row: int, col: int) -> bool:
+        center = (self.config.board_size - 1) / 2.0
+        radius = max(1.0, (self.config.board_size - 1) * self.config.reward.opening_center_radius_ratio)
+        distance_sq = (row - center) ** 2 + (col - center) ** 2
+        return distance_sq <= radius ** 2
+
+    def _is_corner(self, row: int, col: int) -> bool:
+        last_index = self.config.board_size - 1
+        return (row, col) in {
+            (0, 0),
+            (0, last_index),
+            (last_index, 0),
+            (last_index, last_index),
+        }
+
+    def _is_edge(self, row: int, col: int) -> bool:
+        last_index = self.config.board_size - 1
+        return row in (0, last_index) or col in (0, last_index)
+
+    def _is_border(self, row: int, col: int) -> bool:
+        return self._is_edge(row, col)
 
     def _flatten_batches(self, episodes: list[EpisodeBatch]) -> TrainingBatch:
         states = []

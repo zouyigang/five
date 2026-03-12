@@ -553,8 +553,35 @@ def _has_tactical_threat(inventory: ThreatInventory) -> bool:
     )
 
 
+def _is_corner_move(board: Board, move: Move) -> bool:
+    last_index = board.size - 1
+    return (move.row, move.col) in {
+        (0, 0),
+        (0, last_index),
+        (last_index, 0),
+        (last_index, last_index),
+    }
+
+
+def _is_edge_move(board: Board, move: Move) -> bool:
+    last_index = board.size - 1
+    return move.row in (0, last_index) or move.col in (0, last_index)
+
+
+def _shape_position_scale(board: Board, move: Move, category: str, config: RewardConfig) -> tuple[float, str | None]:
+    if category not in {"open_three", "jump_open_three", "sleep_three"}:
+        return 1.0, None
+    if _is_corner_move(board, move):
+        return config.corner_shape_decay, "角落棋型价值折减"
+    if _is_edge_move(board, move):
+        return config.edge_shape_decay, "边线棋型价值折减"
+    return 1.0, None
+
+
 def _accumulate_shape_reward(
     details: list[RewardDetail],
+    board: Board,
+    move: Move,
     features: ShapeFeatures,
     scale: float,
     config: RewardConfig,
@@ -579,8 +606,12 @@ def _accumulate_shape_reward(
 
     weight = _shape_weight_map(config)[category]
     reason = _shape_label_map()[category]
-    amount = count * weight * scale
-    details.append(RewardDetail(amount=amount, reason=f"{reason} x{count}"))
+    position_scale, scale_reason = _shape_position_scale(board, move, category, config)
+    amount = count * weight * scale * position_scale
+    detail_reason = f"{reason} x{count}"
+    if scale_reason is not None and position_scale < 1.0:
+        detail_reason = f"{detail_reason}（{scale_reason} {position_scale:.2f}）"
+    details.append(RewardDetail(amount=amount, reason=detail_reason))
     return amount
 
 
@@ -739,18 +770,13 @@ def _accumulate_opening_position_reward(
     if center_bias > 1e-8:
         details.append(RewardDetail(amount=center_bias, reason="开局中心趋向奖励"))
 
-    is_corner = (row, col) in {
-        (0, 0),
-        (0, last_index),
-        (last_index, 0),
-        (last_index, last_index),
-    }
+    is_corner = _is_corner_move(board, move)
     if is_corner:
         penalty = -config.opening_corner_penalty
         details.append(RewardDetail(amount=penalty, reason="开局角落落子惩罚"))
         return center_bias + penalty
 
-    if row in (0, last_index) or col in (0, last_index):
+    if _is_edge_move(board, move):
         penalty = -config.opening_edge_penalty
         details.append(RewardDetail(amount=penalty, reason="开局边线落子惩罚"))
         return center_bias + penalty
@@ -763,6 +789,49 @@ def _accumulate_opening_position_reward(
         return center_bias + bonus
 
     return center_bias
+
+
+def _opening_position_scale(
+    details: list[RewardDetail],
+    opponent_before: ThreatInventory,
+    miss_penalty: float,
+    missed_own_win_penalty: float,
+    is_winning_move: bool,
+    config: RewardConfig,
+) -> float:
+    if is_winning_move:
+        return 0.0
+    if miss_penalty != 0.0 or missed_own_win_penalty != 0.0:
+        return 0.0
+    if (
+        opponent_before.immediate_win
+        or opponent_before.open_four
+        or opponent_before.rush_four
+        or opponent_before.four_three
+    ):
+        if config.opening_major_threat_scale < 1.0:
+            details.append(
+                RewardDetail(
+                    amount=0.0,
+                    reason=f"开局位置权重降低（对手强威胁，x{config.opening_major_threat_scale:.2f}）",
+                )
+            )
+        return config.opening_major_threat_scale
+    if (
+        opponent_before.double_three
+        or opponent_before.open_three
+        or opponent_before.jump_open_three
+        or _has_tactical_threat(opponent_before)
+    ):
+        if config.opening_minor_threat_scale < 1.0:
+            details.append(
+                RewardDetail(
+                    amount=0.0,
+                    reason=f"开局位置权重降低（对手牵制威胁，x{config.opening_minor_threat_scale:.2f}）",
+                )
+            )
+        return config.opening_minor_threat_scale
+    return 1.0
 
 
 def compute_outcome_tail_bonus(
@@ -805,7 +874,7 @@ def compute_process_reward_with_details(
     opponent_after = _scan_existing_threat_inventory(board, opponent)
     board.grid[move.row, move.col] = 0
 
-    attack_reward = _accumulate_shape_reward(details, my_features, config.attack_scale, config)
+    attack_reward = _accumulate_shape_reward(details, board, move, my_features, config.attack_scale, config)
     block_reward = _accumulate_block_reward(details, opponent_before, opponent_after, config)
     # A direct win ends the game immediately, so opponent threats no longer matter.
     miss_penalty = 0.0
@@ -813,16 +882,20 @@ def compute_process_reward_with_details(
         miss_penalty = _accumulate_miss_penalty(details, opponent_before, opponent_after, config)
     missed_own_win_penalty = _accumulate_missed_own_win_penalty(details, board, move, player, config, opponent_before)
     opening_position_reward = 0.0
-    # Opening heuristics are only useful in quiet positions. When there is an
-    # urgent tactical threat on the board, they should not dilute a defensive
-    # penalty or punish a necessary edge/blocking move.
-    if (
-        not is_winning_move
-        and miss_penalty == 0.0
-        and missed_own_win_penalty == 0.0
-        and not _has_tactical_threat(opponent_before)
-    ):
-        opening_position_reward = _accumulate_opening_position_reward(details, board, move, config)
+    stones_played = int(np.count_nonzero(board.grid))
+    if stones_played < config.opening_position_horizon:
+        opening_position_scale = _opening_position_scale(
+            details,
+            opponent_before,
+            miss_penalty,
+            missed_own_win_penalty,
+            is_winning_move,
+            config,
+        )
+        if opening_position_scale > 0.0:
+            opening_position_reward = (
+                _accumulate_opening_position_reward(details, board, move, config) * opening_position_scale
+            )
 
     total_reward = attack_reward + block_reward + miss_penalty + missed_own_win_penalty + opening_position_reward
     clipped_reward = _clip(total_reward, -config.max_process_reward, config.max_process_reward)

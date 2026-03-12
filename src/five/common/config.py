@@ -11,11 +11,15 @@ class RewardConfig:
     block_scale: float = 0.025
     max_process_reward: float = 1.5
     max_total_reward: float = 4.0
-    opening_position_horizon: int = 12
+    opening_position_horizon: int = 18
     opening_center_bonus: float = 0.08
-    opening_edge_penalty: float = 0.12
-    opening_corner_penalty: float = 0.25
+    opening_edge_penalty: float = 0.18
+    opening_corner_penalty: float = 0.35
     opening_center_radius_ratio: float = 0.22
+    opening_minor_threat_scale: float = 0.5
+    opening_major_threat_scale: float = 0.15
+    edge_shape_decay: float = 0.9
+    corner_shape_decay: float = 0.75
 
     final_win_reward: float = 3.0
     draw_reward: float = 0.0

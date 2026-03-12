@@ -366,7 +366,7 @@ def test_opening_position_reward_is_suppressed_when_ignoring_opponent_open_three
     assert result.total_reward < 0
 
 
-def test_opening_position_reward_is_suppressed_in_tactical_blocking_positions():
+def test_opening_position_reward_is_strongly_reduced_in_tactical_blocking_positions():
     board = _place(
         Board(size=9, win_length=5),
         [
@@ -383,7 +383,76 @@ def test_opening_position_reward_is_suppressed_in_tactical_blocking_positions():
     result = compute_process_reward_with_details(board, Move(8, 4), -1)
 
     assert any("封堵对方冲四/跳四" in detail.reason for detail in result.details)
-    assert not any("开局" in detail.reason for detail in result.details)
+    assert any("开局位置权重降低（对手强威胁" in detail.reason for detail in result.details)
+    assert any("开局" in detail.reason for detail in result.details)
+
+
+def test_opening_position_reward_is_softened_when_blocking_open_three():
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 3, 1),
+            (4, 4, 1),
+            (4, 5, 1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(4, 2), -1)
+
+    assert any("封堵对方活三" in detail.reason for detail in result.details)
+    assert any("开局位置权重降低（对手牵制威胁" in detail.reason for detail in result.details)
+    assert any("开局" in detail.reason for detail in result.details)
+
+
+def test_edge_open_three_reward_is_discounted_relative_to_center():
+    config = RewardConfig(
+        attack_scale=0.1,
+        opening_position_horizon=0,
+        edge_shape_decay=0.9,
+        corner_shape_decay=0.75,
+    )
+    center_board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 4, 1),
+            (4, 5, 1),
+        ],
+    )
+    edge_board = _place(
+        Board(size=9, win_length=5),
+        [
+            (0, 4, 1),
+            (0, 5, 1),
+        ],
+    )
+
+    center_result = compute_process_reward_with_details(center_board, Move(4, 3), 1, config)
+    edge_result = compute_process_reward_with_details(edge_board, Move(0, 3), 1, config)
+
+    assert center_result.total_reward > edge_result.total_reward
+    assert any("边线棋型价值折减" in detail.reason for detail in edge_result.details)
+
+
+def test_open_four_reward_is_not_discounted_on_edge():
+    config = RewardConfig(
+        attack_scale=0.1,
+        opening_position_horizon=0,
+        edge_shape_decay=0.5,
+        corner_shape_decay=0.5,
+    )
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (0, 1, 1),
+            (0, 2, 1),
+            (0, 3, 1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(0, 4), 1, config)
+
+    assert any("形成活四" in detail.reason for detail in result.details)
+    assert not any("棋型价值折减" in detail.reason for detail in result.details)
 
 
 def test_miss_own_open_four_penalty_triggers_when_no_opponent_threat():
