@@ -99,11 +99,24 @@ class HeuristicPlayer:
         scored = [(_score_move_for_heuristic(board, m, player), m) for m in legal]
         scored.sort(key=lambda item: item[0], reverse=True)
 
-        best_score, best_move = scored[0]
+        if temperature <= 1e-6:
+            best_score, best_move = scored[0]
+            action_probability = 1.0
+        else:
+            # 按 temperature 做软采样，避免双方完全对称导致全是和棋
+            scores = [s for s, _ in scored]
+            max_s = max(scores)
+            exp_scores = [math.exp((s - max_s) / temperature) for s in scores]
+            total = sum(exp_scores)
+            probs = [x / total for x in exp_scores]
+            idx = random.choices(range(len(scored)), weights=probs, k=1)[0]
+            best_score, best_move = scored[idx]
+            action_probability = probs[idx]
+
         candidates = [CandidateMove(move=m, score=float(s)) for s, m in scored[:5]]
         return AnalysisResult(
             action=best_move,
-            action_probability=1.0,
+            action_probability=action_probability,
             value_estimate=best_score,
             candidates=candidates,
         )

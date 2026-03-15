@@ -3,7 +3,19 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from five.storage.schemas import MoveRecord
+from five.storage.schemas import GameRecord, MoveRecord
+
+
+def _player_type_label(raw: str) -> str:
+    if raw in ("model", "selfplay_model"):
+        return "模型"
+    if raw == "heuristic":
+        return "启发式"
+    if raw == "historical":
+        return "历史"
+    if raw == "human":
+        return "人类"
+    return raw
 
 
 class MoveDetailPanel(ttk.Frame):
@@ -12,9 +24,14 @@ class MoveDetailPanel(ttk.Frame):
         self.text = tk.Text(self, width=40, height=30, state="disabled")
         self.text.pack(fill=tk.BOTH, expand=True)
 
-    def show_move(self, move: MoveRecord | None) -> None:
+    def show_move(self, move: MoveRecord | None, record: GameRecord | None = None) -> None:
         self.text.configure(state="normal")
         self.text.delete("1.0", tk.END)
+        if record is not None:
+            self.text.insert(tk.END, "本局对手类型:\n")
+            self.text.insert(tk.END, f"  黑方: {_player_type_label(record.black_player)}\n")
+            self.text.insert(tk.END, f"  白方: {_player_type_label(record.white_player)}\n")
+            self.text.insert(tk.END, "\n")
         if move is None:
             self.text.insert(tk.END, "选择一步后显示详细信息。\n")
         else:
@@ -46,4 +63,10 @@ class MoveDetailPanel(ttk.Frame):
                     tk.END,
                     f"- ({item.row}, {item.col}) score={item.score:.4f}\n",
                 )
+            if move.human_rating is not None and getattr(move, "human_bad_reasons", None):
+                self.text.insert(tk.END, "\n" + "=" * 35 + "\n")
+                self.text.insert(tk.END, "坏手原因:\n")
+                self.text.insert(tk.END, "=" * 35 + "\n")
+                for r in move.human_bad_reasons:
+                    self.text.insert(tk.END, f"  · {r}\n")
         self.text.configure(state="disabled")

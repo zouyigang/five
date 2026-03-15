@@ -182,6 +182,8 @@ class VersusAIPage(ttk.Frame):
             self.state.apply_move(move)
             self.render()
             self._show_terminal_if_needed()
+            if not self.state.is_terminal:
+                self.status_var.set("轮到你。")
         else:
             self.status_var.set("AI 返回了非法着法。")
 

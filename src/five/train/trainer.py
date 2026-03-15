@@ -147,6 +147,20 @@ class PPOTrainer:
                     else:
                         black_engine = historical_opponent
                         tracked_players = {-1}
+                black_player_name = (
+                    "model"
+                    if black_engine is self.engine
+                    else "heuristic"
+                    if black_engine is heuristic_opponent
+                    else "historical"
+                )
+                white_player_name = (
+                    "model"
+                    if white_engine is self.engine
+                    else "heuristic"
+                    if white_engine is heuristic_opponent
+                    else "historical"
+                )
                 result = play_self_play_game(
                     game=self.game,
                     black_engine=black_engine,
@@ -156,6 +170,8 @@ class PPOTrainer:
                     temperature=temperature,
                     reward_config=self.config.reward,
                     tracked_players=tracked_players,
+                    black_player=black_player_name,
+                    white_player=white_player_name,
                 )
                 batches.append(result.episode)
                 total_game_length += result.record.total_moves
@@ -283,10 +299,15 @@ class PPOTrainer:
 
     def _is_edge(self, row: int, col: int) -> bool:
         last_index = self.config.board_size - 1
-        return row in (0, last_index) or col in (0, last_index)
+        if row in (0, last_index) or col in (0, last_index):
+            return True
+        if row in (1, last_index - 1) or col in (1, last_index - 1):
+            return True
+        return False
 
     def _is_border(self, row: int, col: int) -> bool:
-        return self._is_edge(row, col)
+        last_index = self.config.board_size - 1
+        return row in (0, last_index) or col in (0, last_index) or row in (1, last_index - 1) or col in (1, last_index - 1)
 
     def _flatten_batches(self, episodes: list[EpisodeBatch]) -> TrainingBatch:
         states = []
@@ -466,10 +487,10 @@ class _LossStats:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a Gomoku PPO self-play model.")
     parser.add_argument("--board-size", type=int, default=9)
-    parser.add_argument("--epochs", type=int, default=1000)
-    parser.add_argument("--games-per-epoch", type=int, default=128)
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size for training")
-    parser.add_argument("--run-name", type=str, default="ppo_gomoku")
+    parser.add_argument("--epochs", type=int, default=600)
+    parser.add_argument("--games-per-epoch", type=int, default=384)
+    parser.add_argument("--batch-size", type=int, default=768, help="Batch size for training")
+    parser.add_argument("--run-name", type=str, default="ppo_gomoku_5080")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint file to resume training")
     return parser

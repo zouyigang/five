@@ -47,6 +47,8 @@ class GameStore:
                     )
                     for summary in item.get("policy_topk", [])
                 ],
+                human_rating=item.get("human_rating"),
+                human_bad_reasons=item.get("human_bad_reasons") or [],
             )
             for item in data["moves"]
         ]

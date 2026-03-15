@@ -5,13 +5,14 @@ from tkinter import ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.ticker import MaxNLocator
 import pandas as pd
 
 
 class MetricsPanel(ttk.Frame):
     def __init__(self, master) -> None:
         super().__init__(master)
-        self.figure = Figure(figsize=(10, 12), dpi=100)
+        self.figure = Figure(figsize=(10, 12), dpi=100, constrained_layout=True)
         self.axes = self.figure.subplots(5, 2)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -177,8 +178,8 @@ class MetricsPanel(ttk.Frame):
 
         window = self._rolling_window(series.to_frame())
         smooth = series.rolling(window=window, min_periods=1).mean()
-        axis.plot(x, series, color=color, alpha=0.22, linewidth=1.0)
-        axis.plot(x, smooth, color=color, linewidth=2.0, label=label)
+        axis.plot(x, series, color=color, alpha=0.22, linewidth=1.0, marker="o", markersize=3)
+        axis.plot(x, smooth, color=color, linewidth=2.0, label=label, marker="o", markersize=3)
         if ylim is not None:
             axis.set_ylim(*ylim)
         if log_scale and (series.dropna() > 0).all():
@@ -208,8 +209,8 @@ class MetricsPanel(ttk.Frame):
             if series is None:
                 continue
             smooth = series.rolling(window=window, min_periods=1).mean()
-            axis.plot(x, series, color=color, alpha=0.2, linewidth=1.0)
-            axis.plot(x, smooth, color=color, linewidth=2.0, label=label)
+            axis.plot(x, series, color=color, alpha=0.2, linewidth=1.0, marker="o", markersize=3)
+            axis.plot(x, smooth, color=color, linewidth=2.0, label=label, marker="o", markersize=3)
             has_data = True
         if not has_data:
             axis.text(0.5, 0.5, "N/A", ha="center", va="center", transform=axis.transAxes)
@@ -219,10 +220,17 @@ class MetricsPanel(ttk.Frame):
         self._add_epoch_markers(axis, best_epoch, anomaly_epochs or [])
         axis.legend()
 
+    def _set_epoch_axis(self, x_min: float, x_max: float) -> None:
+        """横轴为整数轮次，刻度数量随范围自动调整，避免过密。"""
+        for ax in self.axes.flat:
+            ax.set_xlim(x_min - 0.5, x_max + 0.5)
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10, min_n_ticks=4))
+
     def update_metrics(self, frame: pd.DataFrame) -> None:
         for axis in self.axes.flat:
             axis.clear()
         if frame.empty:
+            self._set_epoch_axis(0.0, 10.0)
             self.canvas.draw_idle()
             return
 
@@ -349,8 +357,8 @@ class MetricsPanel(ttk.Frame):
             if anomaly_epochs:
                 status_parts.append("anomaly epochs=" + ", ".join(str(epoch) for epoch in anomaly_epochs[:5]))
             self.figure.suptitle(" | ".join(status_parts), fontsize=10)
-            self.figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
         else:
             self.figure.suptitle("")
-            self.figure.tight_layout()
+        x_min, x_max = float(x.min()), float(x.max())
+        self._set_epoch_axis(x_min, x_max)
         self.canvas.draw_idle()

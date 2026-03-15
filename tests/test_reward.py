@@ -46,7 +46,7 @@ def test_blocking_opponent_open_four_is_better_than_ignoring_it():
 
     assert block_result.total_reward < 0
     assert block_result.total_reward > ignore_result.total_reward
-    assert any("延缓对方活四一手" in detail.reason for detail in block_result.details)
+    assert any("封堵对方活四" in detail.reason for detail in block_result.details)
     assert any("堵截活四不彻底仍留冲四" in detail.reason for detail in block_result.details)
     assert not any("封堵对方活四" in detail.reason for detail in block_result.details)
 
@@ -210,7 +210,7 @@ def test_delaying_open_four_gives_small_positive_credit_without_counting_as_full
 
     result = compute_process_reward_with_details(board, Move(4, 0), 1)
 
-    assert any("延缓对方活四一手" in detail.reason for detail in result.details)
+    assert any("封堵对方活四" in detail.reason for detail in result.details)
     assert not any("封堵对方活四" in detail.reason for detail in result.details)
     assert result.total_reward < 0
 
@@ -345,6 +345,7 @@ def test_opening_position_reward_can_stack_with_shape_reward():
 
 
 def test_opening_position_reward_is_suppressed_when_ignoring_opponent_open_three():
+    """漏防对方活三时必有漏防惩罚且总分为负；开局位置奖惩仍可叠加（漏防+走边会同时扣分）。"""
     board = _place(
         Board(size=9, win_length=5),
         [
@@ -362,8 +363,69 @@ def test_opening_position_reward_is_suppressed_when_ignoring_opponent_open_three
 
     assert any("形成活三" in detail.reason for detail in result.details)
     assert any("未压制对方活三" in detail.reason for detail in result.details)
-    assert not any("开局" in detail.reason for detail in result.details)
     assert result.total_reward < 0
+
+
+def test_miss_open_three_plus_edge_gets_both_penalties():
+    """漏防对方活三且走边线时，同时扣漏防与边线惩罚。"""
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (3, 3, 1),
+            (4, 4, -1),
+            (3, 4, 1),
+            (4, 5, -1),
+            (3, 5, 1),
+            (5, 3, -1),
+            (5, 5, 1),
+        ],
+    )
+    result = compute_process_reward_with_details(board, Move(0, 4), -1)
+    assert any("未压制对方活三" in detail.reason for detail in result.details)
+    assert any("开局边线落子惩罚" in detail.reason for detail in result.details)
+    assert result.total_reward < -0.4
+
+
+def test_opening_second_ring_move_is_penalized_less_than_outer_edge():
+    """次外圈（第1行/列）受半额边线惩罚，且弱于最外圈。"""
+    config = RewardConfig(
+        opening_center_bonus=0.05,
+        opening_edge_penalty=0.40,
+        opening_corner_penalty=0.50,
+    )
+    board = Board(size=9, win_length=5)
+
+    outer_result = compute_process_reward_with_details(board, Move(0, 4), 1, config)
+    second_result = compute_process_reward_with_details(board, Move(1, 4), 1, config)
+
+    assert any("开局边线落子惩罚" == d.reason for d in outer_result.details)
+    assert any("开局次边线落子惩罚" == d.reason for d in second_result.details)
+    assert second_result.total_reward > outer_result.total_reward
+    assert second_result.total_reward < 0
+
+
+def test_second_ring_shape_decay_is_milder_than_outer_edge():
+    """次外圈棋型折减弱于最外圈。"""
+    config = RewardConfig(
+        attack_scale=0.1,
+        opening_position_horizon=0,
+        edge_shape_decay=0.65,
+    )
+    outer_board = _place(
+        Board(size=9, win_length=5),
+        [(0, 4, 1), (0, 5, 1)],
+    )
+    second_board = _place(
+        Board(size=9, win_length=5),
+        [(1, 4, 1), (1, 5, 1)],
+    )
+
+    outer_result = compute_process_reward_with_details(outer_board, Move(0, 3), 1, config)
+    second_result = compute_process_reward_with_details(second_board, Move(1, 3), 1, config)
+
+    assert any("边线棋型价值折减" in d.reason for d in outer_result.details)
+    assert any("次边线棋型价值折减" in d.reason for d in second_result.details)
+    assert second_result.total_reward > outer_result.total_reward
 
 
 def test_opening_position_reward_is_strongly_reduced_in_tactical_blocking_positions():
@@ -493,6 +555,29 @@ def test_miss_own_open_four_penalty_suppressed_when_opponent_has_winning_move():
     assert any("封堵对方冲四/跳四" in detail.reason for detail in result.details)
     assert not any("错失形成活四" in detail.reason for detail in result.details)
     assert result.total_reward > 0
+
+
+def test_missed_own_win_suppresses_attack_reward():
+    """错失直接获胜时不再叠加进攻奖励，总分必为负。"""
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 0, 1),
+            (4, 1, 1),
+            (4, 2, 1),
+            (4, 3, 1),
+            (3, 5, 1),
+            (3, 6, 1),
+            (3, 7, 1),
+        ],
+    )
+
+    result = compute_process_reward_with_details(board, Move(3, 4), 1)
+
+    assert any("错失直接获胜落点" in d.reason for d in result.details)
+    assert not any(d.amount > 0 for d in result.details)
+    assert result.total_reward < 0
+    assert result.missed_own_win is True
 
 
 def test_forming_own_open_four_when_opponent_has_winning_move_is_negative():

@@ -30,6 +30,10 @@ class MoveRecord:
     total_reward: float = 0.0
     reward_details: list[RewardDetail] = field(default_factory=list)
     policy_topk: list[MoveSummary] = field(default_factory=list)
+    # 人类评分：None=未评，0.0=标记为坏棋，后续可扩展 0~1
+    human_rating: float | None = None
+    # 标记为坏棋时选择的原因（来自奖励扣分项），可多选
+    human_bad_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

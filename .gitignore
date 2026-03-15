@@ -38,6 +38,8 @@ env/
 Thumbs.db
 
 # Project outputs
+data/
+pretrain_output/
 runs/
 
 # Testing / Coverage

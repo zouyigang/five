@@ -32,6 +32,7 @@ def _apply_hybrid_rewards(
     reward_results = []
     total_transitions = len(episode.transitions)
     for index, transition in enumerate(episode.transitions):
+        missed_own_win = False
         if transition.board_before is not None and transition.move is not None:
             result = compute_hybrid_reward_with_details(
                 transition.board_before,
@@ -42,15 +43,17 @@ def _apply_hybrid_rewards(
             )
             details = [RewardDetail(amount=d.amount, reason=d.reason) for d in result.details]
             transition.reward = result.total_reward
+            missed_own_win = result.missed_own_win
         else:
             transition.reward = 0.0
             details = []
 
-        plies_from_end = total_transitions - index - 1
-        tail_bonus = compute_outcome_tail_bonus(transition.player, winner, plies_from_end, config)
-        if tail_bonus is not None:
-            transition.reward += tail_bonus.amount
-            details.append(RewardDetail(amount=tail_bonus.amount, reason=tail_bonus.reason))
+        if not missed_own_win:
+            plies_from_end = total_transitions - index - 1
+            tail_bonus = compute_outcome_tail_bonus(transition.player, winner, plies_from_end, config)
+            if tail_bonus is not None:
+                transition.reward += tail_bonus.amount
+                details.append(RewardDetail(amount=tail_bonus.amount, reason=tail_bonus.reason))
 
         reward_results.append((transition.reward, details))
         transition.done = False
@@ -69,11 +72,17 @@ def play_self_play_game(
     reward_config: RewardConfig | None = None,
     white_engine: AIEngine | None = None,
     tracked_players: set[int] | None = None,
+    black_player: str | None = None,
+    white_player: str | None = None,
 ) -> SelfPlayResult:
     if white_engine is None:
         white_engine = black_engine
     if tracked_players is None:
         tracked_players = {1, -1}
+    if black_player is None:
+        black_player = "selfplay_model"
+    if white_player is None:
+        white_player = "selfplay_model"
 
     state = game.new_game()
     episode = EpisodeBatch()
@@ -142,8 +151,8 @@ def play_self_play_game(
         win_length=state.board.win_length,
         winner=state.winner,
         total_moves=len(moves),
-        black_player="selfplay_model",
-        white_player="selfplay_model",
+        black_player=black_player,
+        white_player=white_player,
         result=result,
         model_checkpoint=checkpoint_name,
         moves=moves,

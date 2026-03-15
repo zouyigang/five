@@ -28,13 +28,20 @@ class BoardCanvas(tk.Canvas):
         self.board_size = board_size
         self.cell = self.pixel_size / max(board_size, 1)
 
-    def render(self, state: GameState, highlights: list[tuple[int, int, float]] | None = None, move_history: list[tuple[int, int, int]] | None = None) -> None:
+    def render(
+        self,
+        state: GameState,
+        highlights: list[tuple[int, int, float]] | None = None,
+        move_history: list[tuple[int, int, int]] | None = None,
+        bad_moves: list[tuple[int, int, int]] | None = None,
+    ) -> None:
+        """bad_moves: list of (row, col, move_index) for stones marked as bad (e.g. human_rating=0)."""
         self.set_board_size(state.board.size)
         self.delete("all")
         self._draw_grid()
         if highlights:
             self._draw_highlights(highlights)
-        
+
         if move_history:
             for move_number, (row, col, player) in enumerate(move_history, 1):
                 self._draw_stone(row, col, player, move_number)
@@ -44,9 +51,11 @@ class BoardCanvas(tk.Canvas):
                     cell = int(state.board.grid[row, col])
                     if cell != 0:
                         self._draw_stone(row, col, cell)
-        
+
         if state.last_move is not None:
             self._draw_last_move_marker(state.last_move.row, state.last_move.col)
+        if bad_moves:
+            self._draw_bad_move_markers(bad_moves)
 
     def set_click_handler(self, callback: Callable[[Move], None]) -> None:
         self.on_click_callback = callback
@@ -77,6 +86,18 @@ class BoardCanvas(tk.Canvas):
         y = self.cell / 2 + row * self.cell
         size = self.cell * 0.1
         self.create_rectangle(x - size, y - size, x + size, y + size, outline="red", width=2)
+
+    def _draw_bad_move_markers(self, bad_moves: list[tuple[int, int, int]]) -> None:
+        """Draw red ring and move index for each (row, col, move_index) marked as bad."""
+        for row, col, move_index in bad_moves:
+            x = self.cell / 2 + col * self.cell
+            y = self.cell / 2 + row * self.cell
+            radius = self.cell * 0.45
+            self.create_oval(
+                x - radius, y - radius, x + radius, y + radius,
+                outline="#c0392b", width=3,
+            )
+            self.create_text(x, y, text=str(move_index), fill="#c0392b", font=("Arial", 12, "bold"))
 
     def _draw_highlights(self, highlights: list[tuple[int, int, float]]) -> None:
         for row, col, strength in highlights:

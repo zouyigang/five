@@ -17,6 +17,9 @@ dependencies = [
 
 [project.scripts]
 five-train = "five.train.trainer:main"
+five-generate = "five.train.imitation_data:main"
+five-pretrain = "five.train.pretrain:main"
+five-export-human-games = "five.train.export_human_games:main"
 five-gui = "five.gui.app:main"
 
 [tool.setuptools]
