@@ -33,11 +33,12 @@ class RewardConfig:
     outcome_horizon: int = 6
 
     # 各棋型的基础分数（再乘 attack_scale/block_scale 得到实际奖励）
+    # 活四/双四/四三/双活三：下一手大概率能赢，奖励放大
     immediate_win_score: float = 100.0
-    open_four_score: float = 45.0
-    double_four_score: float = 55.0
-    four_three_score: float = 40.0
-    double_three_score: float = 35.0
+    open_four_score: float = 65.0
+    double_four_score: float = 75.0
+    four_three_score: float = 60.0
+    double_three_score: float = 55.0
     rush_four_score: float = 20.0
     open_three_score: float = 10.0
     jump_open_three_score: float = 7.0
@@ -45,9 +46,22 @@ class RewardConfig:
     restricted_open_three_score: float = 5.0
     sleep_three_score: float = 3.0
 
+    # 封堵专用分数：直接消除制胜手（冲四/活三等）高于堵了对方还有（活四/双四等）
+    # 活四/双四/四三/双活三：堵一端对方仍有制胜手，分数减半
+    block_open_four_score: float = 10.0
+    block_double_four_score: float = 10.0
+    block_four_three_score: float = 10.0
+    block_double_three_score: float = 10.0
+    block_rush_four_score: float = 55.0
+    block_open_three_score: float = 50.0
+    block_jump_open_three_score: float = 45.0
+    block_restricted_open_three_score: float = 40.0
+
     # ---------- 错失 ---------- 己方有机会未把握的惩罚
-    miss_own_immediate_win_penalty: float = 1.2
-    miss_own_open_four_penalty: float = 1.0
+    # miss_own_immediate_win_penalty=2.5 确保错失直接获胜时总为负（含封堵活四），见 docs/reward_strict_miss_win_scheme.md
+    miss_own_immediate_win_penalty: float = 2.5
+    # 需 > 封堵活三奖励(50*0.035=1.75)，确保错失形成活四时总为负
+    miss_own_open_four_penalty: float = 2.0
     # ---------- 未阻止 ---------- 对方制胜手或可执行着法未拦住（冲四/跳四由 miss_immediate_win 覆盖；活四双赢点、一手成活四、一手成四三或双活三）
     miss_immediate_win_penalty: float = 2.8
     # 对方下一手成活四/四三/双活三后均近制胜，扣分与制胜手同档
@@ -99,9 +113,9 @@ class TrainingConfig:
     heuristic_opponent_max_prob: float = 0.55
     heuristic_start_fraction: float = 0.02
     heuristic_ramp_fraction: float = 0.18
-    # 评估与 checkpoint：每轮评估局数；每隔多少轮保存一次模型
+    # 评估与 checkpoint：每轮评估局数；每隔多少轮保存一次模型；另自动保存 best.pt 和 last.pt
     eval_games: int = 48
-    checkpoint_every: int = 2
+    checkpoint_every: int = 10
     # 训练设备（cuda/cpu）；运行结果根目录
     device: str = "cuda"
     runs_dir: str = "runs"
@@ -121,7 +135,7 @@ class GUIConfig:
     # 主窗口宽高（像素）；训练监控等轮询间隔（毫秒）
     window_width: int = 1300
     window_height: int = 800
-    poll_interval_ms: int = 500
+    poll_interval_ms: int = 2000
 
 
 @dataclass(slots=True)

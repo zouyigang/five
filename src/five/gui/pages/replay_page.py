@@ -83,7 +83,7 @@ class ReplayPage(ttk.Frame):
         self.current_record = record
         moves = [Move(row=item.row, col=item.col) for item in record.moves]
         self.frames = reconstruct_states(moves, board_size=record.board_size, win_length=record.win_length)
-        self.current_index = len(self.frames) - 1 if self.frames else 0
+        self.current_index = 0
         self._update_bad_moves_label()
         self.render_current()
 

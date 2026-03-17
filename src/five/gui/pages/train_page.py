@@ -13,6 +13,7 @@ class TrainMonitorPage(ttk.Frame):
         super().__init__(master)
         self.controller = controller
         self.poll_interval_ms = poll_interval_ms
+        self._polling: bool = False
         self.selected_run = tk.StringVar()
         self._run_lookup: dict[str, Path] = {}
 
@@ -28,7 +29,14 @@ class TrainMonitorPage(ttk.Frame):
 
         self.run_box.bind("<<ComboboxSelected>>", lambda _: self.refresh_metrics())
         self.refresh_runs()
-        self.after(self.poll_interval_ms, self._poll)
+
+    def set_active(self, active: bool) -> None:
+        """由主窗口在 Tab 显示/隐藏时调用，控制是否轮询 metrics。"""
+        if active and not self._polling:
+            self._polling = True
+            self._poll()
+        elif not active:
+            self._polling = False
 
     def refresh_runs(self) -> None:
         runs = self.controller.list_runs()
@@ -49,5 +57,9 @@ class TrainMonitorPage(ttk.Frame):
         self.metrics_panel.update_metrics(frame)
 
     def _poll(self) -> None:
+        if not self._polling:
+            return
         self.refresh_metrics()
-        self.after(self.poll_interval_ms, self._poll)
+        # 仅在仍处于激活状态时继续注册下一次轮询
+        if self._polling:
+            self.after(self.poll_interval_ms, self._poll)

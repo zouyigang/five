@@ -5,8 +5,10 @@ from tkinter import ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-from matplotlib.ticker import MaxNLocator
+from matplotlib.ticker import MultipleLocator
 import pandas as pd
+
+from five.train.best_epoch import compute_best_epoch
 
 
 class MetricsPanel(ttk.Frame):
@@ -29,35 +31,7 @@ class MetricsPanel(ttk.Frame):
         return series
 
     def _best_epoch(self, frame: pd.DataFrame) -> int | None:
-        epoch = self._series(frame, "epoch")
-        heuristic = self._series(frame, "eval_win_rate_heuristic")
-        random_wr = self._series(frame, "eval_win_rate_random")
-        value_loss = self._series(frame, "value_loss")
-        entropy = self._series(frame, "entropy")
-        avg_length = self._series(frame, "avg_game_length")
-        if epoch is None or heuristic is None or random_wr is None:
-            return None
-
-        window = self._rolling_window(frame)
-        h_smooth = heuristic.rolling(window=window, min_periods=1).mean().fillna(-1.0)
-        r_smooth = random_wr.rolling(window=window, min_periods=1).mean().fillna(-1.0)
-        vl_smooth = value_loss.rolling(window=window, min_periods=1).mean().fillna(float("inf")) if value_loss is not None else pd.Series([float("inf")] * len(frame))
-        ent = entropy.fillna(0.0) if entropy is not None else pd.Series([0.0] * len(frame))
-        length = avg_length.fillna(81.0) if avg_length is not None else pd.Series([81.0] * len(frame))
-
-        ent_max = max(ent.max(), 1e-8)
-        length_max = max(length.max(), 1.0)
-        vl_max = max(vl_smooth.max(), 1e-8)
-
-        scores = (
-            h_smooth * 4.0
-            + r_smooth * 2.0
-            + (ent / ent_max) * 1.0
-            - (vl_smooth / vl_max) * 0.5
-            - (length / length_max) * 0.5
-        )
-        best_idx = int(scores.idxmax())
-        return int(epoch.iloc[best_idx])
+        return compute_best_epoch(frame)
 
     def _anomaly_epochs(self, frame: pd.DataFrame) -> list[int]:
         epoch = self._series(frame, "epoch")
@@ -221,10 +195,13 @@ class MetricsPanel(ttk.Frame):
         axis.legend()
 
     def _set_epoch_axis(self, x_min: float, x_max: float) -> None:
-        """横轴为整数轮次，刻度数量随范围自动调整，避免过密。"""
+        """横轴为整数轮次，刻度数量随范围动态调整，避免轮次多时过密卡顿。"""
+        span = max(1.0, x_max - x_min + 1)
+        # 目标约 8–12 个刻度，轮次少时步长 1
+        step = max(1, int(span / 10))
         for ax in self.axes.flat:
             ax.set_xlim(x_min - 0.5, x_max + 0.5)
-            ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10, min_n_ticks=4))
+            ax.xaxis.set_major_locator(MultipleLocator(step))
 
     def update_metrics(self, frame: pd.DataFrame) -> None:
         for axis in self.axes.flat:

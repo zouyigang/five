@@ -61,6 +61,7 @@ class GeneratePage(ttk.Frame):
         self._replay_frames: list = []
         self._replay_index = 0
         self._win_length = 5
+        self._polling: bool = False
 
         # 进度文件（与训练监控一致：下拉框 + 刷新）
         path_frame = ttk.Frame(self)
@@ -132,7 +133,15 @@ class GeneratePage(ttk.Frame):
         self.detail_text.pack(fill=tk.BOTH, expand=True)
         detail_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.after(800, self._poll_progress_file)
+        # 轮询进度文件改为按 Tab 激活状态控制，由主窗口调用 set_active。
+
+    def set_active(self, active: bool) -> None:
+        """由主窗口在 Tab 显示/隐藏时调用，控制是否轮询生成进度。"""
+        if active and not self._polling:
+            self._polling = True
+            self._poll_progress_file()
+        elif not active:
+            self._polling = False
 
     def _refresh_progress_files(self) -> None:
         values = _scan_generate_progress_files()
@@ -142,6 +151,8 @@ class GeneratePage(ttk.Frame):
             self._progress_path.set(values[0])
 
     def _poll_progress_file(self) -> None:
+        if not self._polling:
+            return
         path = self._progress_path.get().strip()
         if path:
             try:
@@ -155,7 +166,9 @@ class GeneratePage(ttk.Frame):
                         self._apply_progress(data)
             except (OSError, json.JSONDecodeError) as _:
                 pass
-        self.after(800, self._poll_progress_file)
+        # 仅在仍处于激活状态时继续注册下一次轮询
+        if self._polling:
+            self.after(2000, self._poll_progress_file)
 
     def _apply_progress(self, data: dict) -> None:
         self._total_games = int(data.get("total_games", 0))

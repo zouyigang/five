@@ -17,6 +17,7 @@ from five.core.game import GomokuGame
 from five.storage.schemas import MetricRecord, ModelRecord
 from five.train.dataset import EpisodeBatch
 from five.train.evaluator import evaluate_policy
+from five.train.best_epoch import compute_best_epoch
 from five.train.run_manager import RunArtifacts, create_run
 from five.train.self_play import SelfPlayResult, play_self_play_game
 
@@ -202,26 +203,39 @@ class PPOTrainer:
                 policy_topk_edge_rate=position_metrics.policy_topk_edge_rate,
             )
             self.artifacts.metric_store.append(metric_record)
+            checkpoint_payload = {
+                "epoch": epoch,
+                "config": self.config.to_dict(),
+                "model_state": self.model.state_dict(),
+                "optimizer_state": self.optimizer.state_dict(),
+            }
+            model_rec = ModelRecord(
+                checkpoint_name="",
+                checkpoint_path="",
+                epoch=epoch,
+                eval_win_rate_random=eval_result.win_rate_random,
+                eval_win_rate_heuristic=eval_result.win_rate_heuristic,
+            )
+            frame = self.artifacts.metric_store.read_frame()
+            best_epoch = compute_best_epoch(frame)
+            if best_epoch is not None and best_epoch == epoch:
+                path = self.artifacts.checkpoint_store.save("best.pt", checkpoint_payload)
+                model_rec.checkpoint_name = "best.pt"
+                model_rec.checkpoint_path = str(path)
+                self.artifacts.model_registry.upsert(model_rec)
+                LOGGER.info("Best epoch=%s, saved best.pt", epoch)
             if epoch % self.config.checkpoint_every == 0:
                 checkpoint_name = f"epoch_{epoch:03d}.pt"
-                path = self.artifacts.checkpoint_store.save(
-                    checkpoint_name,
-                    {
-                        "epoch": epoch,
-                        "config": self.config.to_dict(),
-                        "model_state": self.model.state_dict(),
-                        "optimizer_state": self.optimizer.state_dict(),
-                    },
-                )
-                self.artifacts.model_registry.add(
-                    ModelRecord(
-                        checkpoint_name=checkpoint_name,
-                        checkpoint_path=str(path),
-                        epoch=epoch,
-                        eval_win_rate_random=eval_result.win_rate_random,
-                        eval_win_rate_heuristic=eval_result.win_rate_heuristic,
-                    )
-                )
+                path = self.artifacts.checkpoint_store.save(checkpoint_name, checkpoint_payload)
+                model_rec.checkpoint_name = checkpoint_name
+                model_rec.checkpoint_path = str(path)
+                self.artifacts.model_registry.add(model_rec)
+            if epoch == self.config.epochs:
+                path = self.artifacts.checkpoint_store.save("last.pt", checkpoint_payload)
+                model_rec.checkpoint_name = "last.pt"
+                model_rec.checkpoint_path = str(path)
+                self.artifacts.model_registry.upsert(model_rec)
+                LOGGER.info("Last epoch model saved as last.pt")
             self.scheduler.step()
             self._remember_current_policy(epoch)
             LOGGER.info(

@@ -468,15 +468,16 @@ PRIMARY_CATEGORY_ORDER = (
     "sleep_three",
 )
 
+# 直接消除制胜手（冲四/活三等）优先于堵了对方还有（活四/双四等）
 BLOCK_MISS_CATEGORY_ORDER = (
-    "open_four",
-    "double_four",
-    "four_three",
     "rush_four",
-    "double_three",
     "open_three",
     "jump_open_three",
     "restricted_open_three",
+    "open_four",
+    "double_four",
+    "four_three",
+    "double_three",
 )
 
 
@@ -496,6 +497,20 @@ def _shape_weight_map(config: RewardConfig) -> dict[str, float]:
         "jump_open_three": config.jump_open_three_score,
         "restricted_open_three": config.restricted_open_three_score,
         "sleep_three": config.sleep_three_score,
+    }
+
+
+def _block_weight_map(config: RewardConfig) -> dict[str, float]:
+    """封堵专用分数：直接消除制胜手（冲四/活三等）高于堵了对方还有（活四/双四等）。"""
+    return {
+        "open_four": config.block_open_four_score,
+        "double_four": config.block_double_four_score,
+        "four_three": config.block_four_three_score,
+        "double_three": config.block_double_three_score,
+        "rush_four": config.block_rush_four_score,
+        "open_three": config.block_open_three_score,
+        "jump_open_three": config.block_jump_open_three_score,
+        "restricted_open_three": config.block_restricted_open_three_score,
     }
 
 
@@ -706,7 +721,7 @@ def _accumulate_block_reward(
     after: ThreatInventory,
     config: RewardConfig,
 ) -> float:
-    weights = _shape_weight_map(config)
+    weights = _block_weight_map(config)
     labels = {
         "open_four": "封堵对方活四",
         "double_four": "封堵对方双四",
@@ -741,9 +756,7 @@ def _accumulate_miss_penalty(
     opp_has_move_to_four_three_after: bool = False,
 ) -> float:
     # Highest priority: opponent had a blockable winning move (e.g. rush four)
-    # and it was not blocked.  An open four has two winning points and cannot
-    # be fully neutralised, so it falls through to the normal penalty logic
-    # which still allows credit for partial blocking.
+    # and it was not blocked.
     if (
         before.immediate_win > 0
         and after.immediate_win > 0
@@ -753,6 +766,18 @@ def _accumulate_miss_penalty(
         details.append(RewardDetail(amount=amount, reason="未阻止对方制胜手"))
         return amount
 
+    total_penalty = 0.0
+    # 对方有活四（双赢点）且未堵任何一端时，同样扣漏防惩罚；堵了由 block_reward 加分
+    if (
+        before.immediate_win > 0
+        and after.immediate_win > 0
+        and before.open_four > 0
+        and after.open_four > 0
+    ):
+        amount = -config.miss_immediate_win_penalty
+        details.append(RewardDetail(amount=amount, reason="未阻止对方制胜手"))
+        total_penalty += amount
+
     # 本手强攻时豁免对一手成活四（活三/跳活三）的漏防惩罚
     waive_lower_threats = my_strong_attack
     # 顺序：未阻止（一手成活四）；冲四/跳四未堵已由上方「未阻止对方制胜手」覆盖并 return；活四由「封堵对方活四」体现，不在此重复扣分
@@ -760,7 +785,6 @@ def _accumulate_miss_penalty(
         ("open_three", config.miss_open_three_penalty, "未阻止对方一手成活四"),
         ("jump_open_three", config.miss_jump_open_three_penalty, "未阻止对方一手成活四"),
     )
-    total_penalty = 0.0
     for category, unit_penalty, reason in penalties:
         if waive_lower_threats and category in (
             "open_three",

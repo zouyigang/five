@@ -19,6 +19,15 @@ class ModelRegistry:
         payload["models"].append(asdict(record))
         write_json(self.path, payload)
 
+    def upsert(self, record: ModelRecord) -> None:
+        """添加或替换同名 checkpoint（用于 best.pt、last.pt 等固定名）。"""
+        payload = read_json(self.path)
+        models = payload.get("models", [])
+        models = [m for m in models if m.get("checkpoint_name") != record.checkpoint_name]
+        models.append(asdict(record))
+        payload["models"] = models
+        write_json(self.path, payload)
+
     def list_models(self) -> list[ModelRecord]:
         payload = read_json(self.path)
         return [ModelRecord(**item) for item in payload.get("models", [])]

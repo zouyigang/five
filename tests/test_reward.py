@@ -44,11 +44,8 @@ def test_blocking_opponent_open_four_is_better_than_ignoring_it():
     block_result = compute_process_reward_with_details(board, Move(4, 0), 1)
     ignore_result = compute_process_reward_with_details(board, Move(0, 0), 1)
 
-    assert block_result.total_reward < 0
     assert block_result.total_reward > ignore_result.total_reward
     assert any("封堵对方活四" in detail.reason for detail in block_result.details)
-    assert any("堵截活四不彻底仍留冲四" in detail.reason for detail in block_result.details)
-    assert not any("封堵对方活四" in detail.reason for detail in block_result.details)
 
 
 def test_missing_opponent_immediate_win_is_penalized():
@@ -67,6 +64,28 @@ def test_missing_opponent_immediate_win_is_penalized():
 
     assert result.total_reward < 0
     assert any("未阻止对方制胜手" in detail.reason for detail in result.details)
+
+
+def test_missing_opponent_open_four_is_penalized():
+    """对方有活四（双赢点）且未堵时，应扣「未阻止对方制胜手」。"""
+    board = _place(
+        Board(size=9, win_length=5),
+        [
+            (4, 1, -1),
+            (4, 2, -1),
+            (4, 3, -1),
+            (4, 4, -1),
+            (3, 2, 1),
+            (3, 3, 1),
+            (3, 4, 1),
+            (3, 5, 1),
+        ],
+    )
+    # 白(1)有活四可赢，黑(-1)有活四可赢。白下(5,2)既错失己方获胜又漏防对方活四
+    result = compute_process_reward_with_details(board, Move(5, 2), 1)
+    assert result.total_reward < 0
+    assert any("未阻止对方制胜手" in detail.reason for detail in result.details)
+    assert any("错失直接获胜落点" in detail.reason for detail in result.details)
 
 
 def test_no_miss_penalty_for_only_potential_future_threes():
@@ -211,8 +230,7 @@ def test_delaying_open_four_gives_small_positive_credit_without_counting_as_full
     result = compute_process_reward_with_details(board, Move(4, 0), 1)
 
     assert any("封堵对方活四" in detail.reason for detail in result.details)
-    assert not any("封堵对方活四" in detail.reason for detail in result.details)
-    assert result.total_reward < 0
+    assert result.total_reward > 0
 
 
 def test_missing_opponent_rush_four_penalised_alongside_open_four_gain():
@@ -362,7 +380,7 @@ def test_opening_position_reward_is_suppressed_when_ignoring_opponent_open_three
     result = compute_process_reward_with_details(board, Move(4, 3), -1)
 
     assert any("形成活三" in detail.reason for detail in result.details)
-    assert any("未压制对方活三" in detail.reason for detail in result.details)
+    assert any("未阻止对方一手成活四" in detail.reason for detail in result.details)
     assert result.total_reward < 0
 
 
@@ -381,7 +399,7 @@ def test_miss_open_three_plus_edge_gets_both_penalties():
         ],
     )
     result = compute_process_reward_with_details(board, Move(0, 4), -1)
-    assert any("未压制对方活三" in detail.reason for detail in result.details)
+    assert any("未阻止对方一手成活四" in detail.reason for detail in result.details)
     assert any("开局边线落子惩罚" in detail.reason for detail in result.details)
     assert result.total_reward < -0.4
 
