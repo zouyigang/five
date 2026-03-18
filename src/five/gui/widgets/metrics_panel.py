@@ -8,7 +8,7 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import MultipleLocator
 import pandas as pd
 
-from five.train.best_epoch import compute_best_epoch
+from five.train.best_epoch import compute_best_epoch, compute_best_epoch_for_resume
 
 
 class MetricsPanel(ttk.Frame):
@@ -32,6 +32,9 @@ class MetricsPanel(ttk.Frame):
 
     def _best_epoch(self, frame: pd.DataFrame) -> int | None:
         return compute_best_epoch(frame)
+
+    def _best_epoch_for_resume(self, frame: pd.DataFrame) -> int | None:
+        return compute_best_epoch_for_resume(frame)
 
     def _anomaly_epochs(self, frame: pd.DataFrame) -> list[int]:
         epoch = self._series(frame, "epoch")
@@ -124,9 +127,11 @@ class MetricsPanel(ttk.Frame):
         ranked_epochs = sorted(scored.items(), key=lambda item: (-item[1], item[0]))
         return [epoch_value for epoch_value, _ in ranked_epochs[:8]]
 
-    def _add_epoch_markers(self, axis, best_epoch: int | None, anomaly_epochs: list[int]) -> None:
+    def _add_epoch_markers(self, axis, best_epoch: int | None, best_for_resume_epoch: int | None, anomaly_epochs: list[int]) -> None:
         if best_epoch is not None:
-            axis.axvline(best_epoch, color="tab:green", linestyle="--", linewidth=1.4, alpha=0.9)
+            axis.axvline(best_epoch, color="tab:green", linestyle="--", linewidth=1.4, alpha=0.9, label="best")
+        if best_for_resume_epoch is not None and best_for_resume_epoch != best_epoch:
+            axis.axvline(best_for_resume_epoch, color="tab:cyan", linestyle="--", linewidth=1.4, alpha=0.9, label="best_for_resume")
         for epoch in anomaly_epochs:
             axis.axvline(epoch, color="tab:red", linestyle=":", linewidth=1.0, alpha=0.45)
 
@@ -142,6 +147,7 @@ class MetricsPanel(ttk.Frame):
         ylim: tuple[float, float] | None = None,
         log_scale: bool = False,
         best_epoch: int | None = None,
+        best_for_resume_epoch: int | None = None,
         anomaly_epochs: list[int] | None = None,
     ) -> None:
         axis.set_title(title)
@@ -158,7 +164,7 @@ class MetricsPanel(ttk.Frame):
             axis.set_ylim(*ylim)
         if log_scale and (series.dropna() > 0).all():
             axis.set_yscale("log")
-        self._add_epoch_markers(axis, best_epoch, anomaly_epochs or [])
+        self._add_epoch_markers(axis, best_epoch, best_for_resume_epoch, anomaly_epochs or [])
         if label is not None:
             axis.legend()
 
@@ -172,6 +178,7 @@ class MetricsPanel(ttk.Frame):
         *,
         ylim: tuple[float, float] | None = None,
         best_epoch: int | None = None,
+        best_for_resume_epoch: int | None = None,
         anomaly_epochs: list[int] | None = None,
     ) -> None:
         axis.set_title(title)
@@ -191,7 +198,7 @@ class MetricsPanel(ttk.Frame):
             return
         if ylim is not None:
             axis.set_ylim(*ylim)
-        self._add_epoch_markers(axis, best_epoch, anomaly_epochs or [])
+        self._add_epoch_markers(axis, best_epoch, best_for_resume_epoch, anomaly_epochs or [])
         axis.legend()
 
     def _set_epoch_axis(self, x_min: float, x_max: float) -> None:
@@ -213,6 +220,7 @@ class MetricsPanel(ttk.Frame):
 
         x = frame["epoch"]
         best_epoch = self._best_epoch(frame)
+        best_for_resume_epoch = self._best_epoch_for_resume(frame)
         anomaly_epochs = self._anomaly_epochs(frame)
         self._plot_metric(
             self.axes[0, 0],
@@ -222,6 +230,7 @@ class MetricsPanel(ttk.Frame):
             label="policy",
             color="tab:blue",
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_metric(
@@ -233,6 +242,7 @@ class MetricsPanel(ttk.Frame):
             color="tab:orange",
             log_scale=True,
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_metric(
@@ -243,6 +253,7 @@ class MetricsPanel(ttk.Frame):
             label="entropy",
             color="tab:green",
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_metric(
@@ -253,6 +264,7 @@ class MetricsPanel(ttk.Frame):
             label="avg length",
             color="tab:red",
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_multi_metric(
@@ -266,6 +278,7 @@ class MetricsPanel(ttk.Frame):
             "Eval Win Rate",
             ylim=(0.0, 1.0),
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_metric(
@@ -277,6 +290,7 @@ class MetricsPanel(ttk.Frame):
             color="tab:purple",
             log_scale=True,
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_multi_metric(
@@ -289,6 +303,7 @@ class MetricsPanel(ttk.Frame):
             ],
             "Return Mean / Std",
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_metric(
@@ -300,6 +315,7 @@ class MetricsPanel(ttk.Frame):
             color="tab:brown",
             log_scale=True,
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_multi_metric(
@@ -314,6 +330,7 @@ class MetricsPanel(ttk.Frame):
             "Opening Position Rates",
             ylim=(0.0, 1.0),
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
         self._plot_metric(
@@ -325,14 +342,17 @@ class MetricsPanel(ttk.Frame):
             color="tab:cyan",
             ylim=(0.0, 1.0),
             best_epoch=best_epoch,
+            best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
-        if best_epoch is not None or anomaly_epochs:
+        if best_epoch is not None or best_for_resume_epoch is not None or anomaly_epochs:
             status_parts = []
             if best_epoch is not None:
-                status_parts.append(f"best epoch={best_epoch}")
+                status_parts.append(f"best={best_epoch}")
+            if best_for_resume_epoch is not None and best_for_resume_epoch != best_epoch:
+                status_parts.append(f"best_for_resume={best_for_resume_epoch}")
             if anomaly_epochs:
-                status_parts.append("anomaly epochs=" + ", ".join(str(epoch) for epoch in anomaly_epochs[:5]))
+                status_parts.append("anomaly=" + ", ".join(str(epoch) for epoch in anomaly_epochs[:5]))
             self.figure.suptitle(" | ".join(status_parts), fontsize=10)
         else:
             self.figure.suptitle("")

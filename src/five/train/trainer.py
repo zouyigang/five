@@ -17,7 +17,7 @@ from five.core.game import GomokuGame
 from five.storage.schemas import MetricRecord, ModelRecord
 from five.train.dataset import EpisodeBatch
 from five.train.evaluator import evaluate_policy
-from five.train.best_epoch import compute_best_epoch
+from five.train.best_epoch import compute_best_epoch, compute_best_epoch_for_resume
 from five.train.run_manager import RunArtifacts, create_run
 from five.train.self_play import SelfPlayResult, play_self_play_game
 
@@ -224,6 +224,13 @@ class PPOTrainer:
                 model_rec.checkpoint_path = str(path)
                 self.artifacts.model_registry.upsert(model_rec)
                 LOGGER.info("Best epoch=%s, saved best.pt", epoch)
+            best_for_resume_epoch = compute_best_epoch_for_resume(frame)
+            if best_for_resume_epoch is not None and best_for_resume_epoch == epoch:
+                path = self.artifacts.checkpoint_store.save("best_for_resume.pt", checkpoint_payload)
+                model_rec.checkpoint_name = "best_for_resume.pt"
+                model_rec.checkpoint_path = str(path)
+                self.artifacts.model_registry.upsert(model_rec)
+                LOGGER.info("Best for resume epoch=%s, saved best_for_resume.pt", epoch)
             if epoch % self.config.checkpoint_every == 0:
                 checkpoint_name = f"epoch_{epoch:03d}.pt"
                 path = self.artifacts.checkpoint_store.save(checkpoint_name, checkpoint_payload)
