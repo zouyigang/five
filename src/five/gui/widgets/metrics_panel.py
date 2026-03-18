@@ -338,4 +338,4 @@ class MetricsPanel(ttk.Frame):
             self.figure.suptitle("")
         x_min, x_max = float(x.min()), float(x.max())
         self._set_epoch_axis(x_min, x_max)
-        self.canvas.draw_idle()
+        self.canvas.draw()

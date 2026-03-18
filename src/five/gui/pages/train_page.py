@@ -52,7 +52,13 @@ class TrainMonitorPage(ttk.Frame):
             return
         run_path = self._run_lookup.get(run_name)
         if run_path is None:
-            return
+            # 当前选中的 run 已不存在，切换到最新 run
+            runs = sorted(self._run_lookup.values(), key=lambda p: p.name)
+            if not runs:
+                return
+            latest_name = runs[-1].name
+            self.selected_run.set(latest_name)
+            run_path = runs[-1]
         frame = self.controller.metric_store(run_path).read_frame()
         self.metrics_panel.update_metrics(frame)
 

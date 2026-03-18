@@ -507,6 +507,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", type=str, default="ppo_gomoku_5080")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint file to resume training")
+    parser.add_argument("--learning-rate", type=float, default=None, help="Learning rate (default: 3.5e-4)")
     return parser
 
 
@@ -522,6 +523,8 @@ def main() -> None:
         run_name=args.run_name,
         device=args.device,
     )
+    if args.learning_rate is not None:
+        config.learning_rate = args.learning_rate
     set_seed(config.seed)
     trainer = PPOTrainer(config, checkpoint_path=args.checkpoint)
     trainer.train()
