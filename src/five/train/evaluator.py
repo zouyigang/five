@@ -24,6 +24,8 @@ def play_match(
     opponent,
     games: int,
     model_player: int,
+    *,
+    opponent_temperature: float = 0.0,
 ) -> float:
     wins = 0
     for _ in range(games):
@@ -32,18 +34,30 @@ def play_match(
             if state.current_player == model_player:
                 analysis = model_engine.select_move(state, temperature=0.0)
             else:
-                analysis = opponent.select_move(state)
+                analysis = opponent.select_move(state, temperature=opponent_temperature)
             state.apply_move(analysis.action)
         if state.winner == model_player:
             wins += 1
     return wins / max(games, 1)
 
 
-def evaluate_policy(game: GomokuGame, model_engine: ModelAIEngine, games: int) -> EvalResult:
+def evaluate_policy(
+    game: GomokuGame,
+    model_engine: ModelAIEngine,
+    games: int,
+    *,
+    heuristic_temperature: float = 0.0,
+) -> EvalResult:
     random_black = play_match(game, model_engine, RandomPlayer(), games=games, model_player=1)
     random_white = play_match(game, model_engine, RandomPlayer(), games=games, model_player=-1)
-    heuristic_black = play_match(game, model_engine, HeuristicPlayer(), games=games, model_player=1)
-    heuristic_white = play_match(game, model_engine, HeuristicPlayer(), games=games, model_player=-1)
+    heuristic_black = play_match(
+        game, model_engine, HeuristicPlayer(), games=games, model_player=1,
+        opponent_temperature=heuristic_temperature,
+    )
+    heuristic_white = play_match(
+        game, model_engine, HeuristicPlayer(), games=games, model_player=-1,
+        opponent_temperature=heuristic_temperature,
+    )
     return EvalResult(
         win_rate_random=(random_black + random_white) / 2.0,
         win_rate_heuristic=(heuristic_black + heuristic_white) / 2.0,

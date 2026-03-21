@@ -5,6 +5,7 @@ from tkinter import ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from matplotlib.ticker import MultipleLocator
 import pandas as pd
 
@@ -129,9 +130,9 @@ class MetricsPanel(ttk.Frame):
 
     def _add_epoch_markers(self, axis, best_epoch: int | None, best_for_resume_epoch: int | None, anomaly_epochs: list[int]) -> None:
         if best_epoch is not None:
-            axis.axvline(best_epoch, color="tab:green", linestyle="--", linewidth=1.4, alpha=0.9, label="best")
-        if best_for_resume_epoch is not None and best_for_resume_epoch != best_epoch:
-            axis.axvline(best_for_resume_epoch, color="tab:cyan", linestyle="--", linewidth=1.4, alpha=0.9, label="best_for_resume")
+            axis.axvline(best_epoch, color="tab:green", linestyle="--", linewidth=1.4, alpha=0.9)
+        if best_for_resume_epoch is not None:
+            axis.axvline(best_for_resume_epoch, color="tab:cyan", linestyle="--", linewidth=1.4, alpha=0.9)
         for epoch in anomaly_epochs:
             axis.axvline(epoch, color="tab:red", linestyle=":", linewidth=1.0, alpha=0.45)
 
@@ -210,9 +211,11 @@ class MetricsPanel(ttk.Frame):
             ax.set_xlim(x_min - 0.5, x_max + 0.5)
             ax.xaxis.set_major_locator(MultipleLocator(step))
 
-    def update_metrics(self, frame: pd.DataFrame) -> None:
+    def update_metrics(self, frame: pd.DataFrame, baseline: dict | None = None) -> None:
         for axis in self.axes.flat:
             axis.clear()
+        for leg in self.figure.legends:
+            leg.remove()
         if frame.empty:
             self._set_epoch_axis(0.0, 10.0)
             self.canvas.draw_idle()
@@ -345,17 +348,33 @@ class MetricsPanel(ttk.Frame):
             best_for_resume_epoch=best_for_resume_epoch,
             anomaly_epochs=anomaly_epochs,
         )
-        if best_epoch is not None or best_for_resume_epoch is not None or anomaly_epochs:
+        if best_epoch is not None or best_for_resume_epoch is not None or anomaly_epochs or baseline:
             status_parts = []
+            if baseline is not None:
+                status_parts.append(f"baseline: {baseline['epoch']} h={baseline['heuristic']:.2f}")
+                if best_epoch is not None and "eval_win_rate_heuristic" in frame.columns:
+                    best_row = frame[frame["epoch"] == best_epoch]
+                    if not best_row.empty:
+                        current_heuristic = float(best_row["eval_win_rate_heuristic"].iloc[0])
+                        delta = current_heuristic - baseline["heuristic"]
+                        arrow = " ↑" if delta > 0 else " ↓" if delta < 0 else ""
+                        status_parts.append(f"delta={delta:+.2f}{arrow}")
             if best_epoch is not None:
                 status_parts.append(f"best={best_epoch}")
-            if best_for_resume_epoch is not None and best_for_resume_epoch != best_epoch:
+            if best_for_resume_epoch is not None:
                 status_parts.append(f"best_for_resume={best_for_resume_epoch}")
             if anomaly_epochs:
                 status_parts.append("anomaly=" + ", ".join(str(epoch) for epoch in anomaly_epochs[:5]))
             self.figure.suptitle(" | ".join(status_parts), fontsize=10)
         else:
             self.figure.suptitle("")
+        handles = []
+        if best_epoch is not None:
+            handles.append(Line2D([0], [0], color="tab:green", linestyle="--", linewidth=1.4, label="best"))
+        if best_for_resume_epoch is not None:
+            handles.append(Line2D([0], [0], color="tab:cyan", linestyle="--", linewidth=1.4, label="best_for_resume"))
+        if handles:
+            self.figure.legend(handles=handles, loc="upper right", ncol=len(handles), frameon=True)
         x_min, x_max = float(x.min()), float(x.max())
         self._set_epoch_axis(x_min, x_max)
         self.canvas.draw()

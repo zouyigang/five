@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
 
 import torch
 from torch import nn
@@ -91,6 +95,7 @@ class PPOTrainer:
         self.artifacts: RunArtifacts = create_run(config)
         self.historical_opponent_snapshots: list[dict[str, torch.Tensor]] = []
         self._epoch_counter: int = 0
+        self._baseline: dict | None = None
 
         if checkpoint_path:
             self._load_checkpoint(checkpoint_path)
@@ -183,7 +188,10 @@ class PPOTrainer:
                     self.artifacts.game_store.save(result.record)
             training_batch = self._flatten_batches(batches)
             stats = self._update_policy(training_batch)
-            eval_result = evaluate_policy(self.game, self.engine, games=self.config.eval_games)
+            eval_result = evaluate_policy(
+                self.game, self.engine, games=self.config.eval_games,
+                heuristic_temperature=self.config.eval_heuristic_temperature,
+            )
             metric_record = MetricRecord(
                 epoch=epoch,
                 games=self.config.self_play_games_per_epoch,
@@ -231,6 +239,19 @@ class PPOTrainer:
                 model_rec.checkpoint_path = str(path)
                 self.artifacts.model_registry.upsert(model_rec)
                 LOGGER.info("Best for resume epoch=%s, saved best_for_resume.pt", epoch)
+            if self._baseline is not None and best_epoch is not None:
+                best_row = frame[frame["epoch"] == best_epoch]
+                if not best_row.empty and "eval_win_rate_heuristic" in best_row.columns:
+                    current_heuristic = float(best_row["eval_win_rate_heuristic"].iloc[0])
+                    delta = current_heuristic - self._baseline["heuristic"]
+                    LOGGER.info(
+                        "Baseline (epoch %s): heuristic=%.2f | Current best (epoch %s): heuristic=%.2f | Delta=%+.2f",
+                        self._baseline["epoch"],
+                        self._baseline["heuristic"],
+                        best_epoch,
+                        current_heuristic,
+                        delta,
+                    )
             if epoch % self.config.checkpoint_every == 0:
                 checkpoint_name = f"epoch_{epoch:03d}.pt"
                 path = self.artifacts.checkpoint_store.save(checkpoint_name, checkpoint_payload)
@@ -380,8 +401,21 @@ class PPOTrainer:
 
         if "config" in checkpoint:
             saved = checkpoint["config"]
+            # 继续训练时保留用户配置，不随 checkpoint 覆盖
+            skip_keys = {
+                "epochs",  # 延长总轮数
+                "checkpoint_every",  # checkpoint 保存间隔
+                "device",  # 切换 GPU/CPU
+                "run_name",  # 新 run 名称
+                "runs_dir",  # 输出目录
+                "learning_rate",  # --learning-rate 微调
+                "batch_size",  # --batch-size
+                "self_play_games_per_epoch",  # --games-per-epoch
+                "eval_games",  # 评估局数
+                "eval_heuristic_temperature",  # 启发式评估温度，影响胜率曲线粒度
+            }
             for key, value in saved.items():
-                if not hasattr(self.config, key):
+                if key in skip_keys or not hasattr(self.config, key):
                     continue
                 if key == "model" and isinstance(value, dict):
                     subset = {k: v for k, v in value.items() if k in getattr(ModelConfig, "__dataclass_fields__", {})}
@@ -393,10 +427,39 @@ class PPOTrainer:
                     setattr(self.config, key, value)
 
         self._start_epoch = int(checkpoint.get("epoch", 0)) + 1
-        for _ in range(self._start_epoch - 1):
-            self.scheduler.step()
+        last_epoch = self._start_epoch - 1
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=self.config.epochs, eta_min=self.config.lr_min, last_epoch=last_epoch
+        )
         LOGGER.info("Checkpoint loaded, resuming from epoch %s", self._start_epoch)
         self.model.eval()
+
+        self._baseline = self._load_baseline_from_checkpoint(checkpoint_path)
+
+    def _load_baseline_from_checkpoint(self, checkpoint_path: str) -> dict | None:
+        """从 checkpoint 所在 run 的 metrics.csv 读取基线，写入新 run 的 baseline.json。"""
+        old_run_dir = Path(checkpoint_path).resolve().parent.parent
+        old_metrics_path = old_run_dir / "metrics.csv"
+        if not old_metrics_path.exists():
+            return None
+        try:
+            frame = pd.read_csv(old_metrics_path)
+        except Exception:
+            return None
+        if "epoch" not in frame.columns or "eval_win_rate_heuristic" not in frame.columns:
+            return None
+        baseline_epoch = int(self._start_epoch - 1)
+        row = frame[frame["epoch"] == baseline_epoch]
+        if row.empty:
+            return None
+        heuristic = float(row["eval_win_rate_heuristic"].iloc[0])
+        random_wr = float(row["eval_win_rate_random"].iloc[0]) if "eval_win_rate_random" in frame.columns else 0.0
+        baseline = {"epoch": baseline_epoch, "heuristic": heuristic, "random": random_wr}
+        baseline_path = self.artifacts.run_dir / "baseline.json"
+        with baseline_path.open("w", encoding="utf-8") as f:
+            json.dump(baseline, f, indent=2)
+        LOGGER.info("Baseline recorded: epoch=%s heuristic=%.2f", baseline_epoch, heuristic)
+        return baseline
 
     def _update_policy(self, batch: TrainingBatch):
         if batch.states.size(0) == 0:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
@@ -60,7 +61,15 @@ class TrainMonitorPage(ttk.Frame):
             self.selected_run.set(latest_name)
             run_path = runs[-1]
         frame = self.controller.metric_store(run_path).read_frame()
-        self.metrics_panel.update_metrics(frame)
+        baseline = None
+        baseline_path = run_path / "baseline.json"
+        if baseline_path.exists():
+            try:
+                with baseline_path.open(encoding="utf-8") as f:
+                    baseline = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+        self.metrics_panel.update_metrics(frame, baseline=baseline)
 
     def _poll(self) -> None:
         if not self._polling:

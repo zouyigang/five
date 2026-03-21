@@ -113,9 +113,10 @@ class TrainingConfig:
     heuristic_opponent_max_prob: float = 0.55
     heuristic_start_fraction: float = 0.02
     heuristic_ramp_fraction: float = 0.18
-    # 评估与 checkpoint：每轮评估局数；每隔多少轮保存一次模型；另自动保存 best.pt 和 last.pt
+    # 评估与 checkpoint：每轮评估局数；启发式对手评估时的采样温度（>0 时增加对局多样性，避免胜率只有 0/0.5/1）
     eval_games: int = 48
-    checkpoint_every: int = 10
+    eval_heuristic_temperature: float = 0.15
+    checkpoint_every: int = 20
     # 训练设备（cuda/cpu）；运行结果根目录
     device: str = "cuda"
     runs_dir: str = "runs"
