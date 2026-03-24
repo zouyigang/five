@@ -183,8 +183,9 @@ class PPOTrainer:
                 total_game_length += result.record.total_moves
                 position_metrics.merge(self._collect_position_metric_totals(result))
                 # 只保存少量对局到硬盘，减小存储占用。
-                # 这里改为每 1000 局保存一局，其余仅用于训练。
-                if game_index % 1000 == 0:
+                # 每千局保存两盘：1000k 与 1000k+1。若只存 1000k，在默认 games_per_epoch=384 下
+                # (game_index-1)%384 恒为奇数，启发式/历史对局中模型总在白方；多存一盘可覆盖偶数 offset，回放能看到模型执黑。
+                if game_index >= 1000 and game_index % 1000 in (0, 1):
                     self.artifacts.game_store.save(result.record)
             training_batch = self._flatten_batches(batches)
             stats = self._update_policy(training_batch)
@@ -413,6 +414,9 @@ class PPOTrainer:
                 "self_play_games_per_epoch",  # --games-per-epoch
                 "eval_games",  # 评估局数
                 "eval_heuristic_temperature",  # 启发式评估温度，影响胜率曲线粒度
+                "heuristic_opponent_max_prob",
+                "heuristic_start_fraction",
+                "heuristic_ramp_fraction",
             }
             for key, value in saved.items():
                 if key in skip_keys or not hasattr(self.config, key):
@@ -569,6 +573,7 @@ class _LossStats:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    d = TrainingConfig()
     parser = argparse.ArgumentParser(description="Train a Gomoku PPO self-play model.")
     parser.add_argument("--board-size", type=int, default=9)
     parser.add_argument("--epochs", type=int, default=600)
@@ -578,6 +583,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint file to resume training")
     parser.add_argument("--learning-rate", type=float, default=None, help="Learning rate (default: 3.5e-4)")
+    parser.add_argument(
+        "--heuristic-max-prob",
+        type=float,
+        default=None,
+        help=(
+            "Per-game probability of sampling heuristic opponent at schedule peak "
+            f"(default: {d.heuristic_opponent_max_prob})"
+        ),
+    )
+    parser.add_argument(
+        "--heuristic-start-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Start ramp after this fraction of total epochs (0 = from epoch 1). "
+            f"Default: {d.heuristic_start_fraction}"
+        ),
+    )
+    parser.add_argument(
+        "--heuristic-ramp-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Linear ramp reaches peak at this epoch fraction (from start). "
+            f"Default: {d.heuristic_ramp_fraction}"
+        ),
+    )
     return parser
 
 
@@ -595,6 +627,12 @@ def main() -> None:
     )
     if args.learning_rate is not None:
         config.learning_rate = args.learning_rate
+    if args.heuristic_max_prob is not None:
+        config.heuristic_opponent_max_prob = args.heuristic_max_prob
+    if args.heuristic_start_fraction is not None:
+        config.heuristic_start_fraction = args.heuristic_start_fraction
+    if args.heuristic_ramp_fraction is not None:
+        config.heuristic_ramp_fraction = args.heuristic_ramp_fraction
     set_seed(config.seed)
     trainer = PPOTrainer(config, checkpoint_path=args.checkpoint)
     trainer.train()

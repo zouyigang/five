@@ -316,8 +316,9 @@ five/
 | `temperature_min` | 0.35 | 最低采样温度 |
 | `historical_opponent_prob` | 0.4 | 历史对手概率 |
 | `opponent_pool_size` | 80 | 对手池大小 |
-| `heuristic_opponent_max_prob` | 0.55 | 启发式对手最大概率 |
-| `heuristic_start_fraction` | 0.02 | 启发式对手引入时间点（占总轮次比例） |
+| `heuristic_opponent_max_prob` | 0.70 | 启发式对手在调度峰值时的单局采样概率 |
+| `heuristic_start_fraction` | 0.0 | 启发式占比开始爬升前跳过的轮次比例（0 表示从第 1 轮就有） |
+| `heuristic_ramp_fraction` | 0.08 | 从零爬升到峰值所经历的轮次比例 |
 | `eval_games` | 48 | 每轮评估局数 |
 | `checkpoint_every` | 2 | checkpoint 保存间隔 |
 
@@ -337,6 +338,8 @@ five/
 five-train [--board-size 9] [--epochs 600] [--games-per-epoch 384]
            [--batch-size 768] [--run-name ppo_gomoku]
            [--device cuda] [--checkpoint PATH]
+           [--heuristic-max-prob 0.70] [--heuristic-start-fraction 0]
+           [--heuristic-ramp-fraction 0.08]
 ```
 
 ### `five-generate` — 生成启发式数据

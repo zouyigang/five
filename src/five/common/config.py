@@ -110,9 +110,9 @@ class TrainingConfig:
     historical_opponent_prob: float = 0.4
     opponent_pool_size: int = 80
     opponent_snapshot_interval: int = 3
-    heuristic_opponent_max_prob: float = 0.55
-    heuristic_start_fraction: float = 0.02
-    heuristic_ramp_fraction: float = 0.18
+    heuristic_opponent_max_prob: float = 0.70
+    heuristic_start_fraction: float = 0.0
+    heuristic_ramp_fraction: float = 0.08
     # 评估与 checkpoint：每轮评估局数；启发式对手评估时的采样温度（>0 时增加对局多样性，避免胜率只有 0/0.5/1）
     eval_games: int = 48
     eval_heuristic_temperature: float = 0.15
