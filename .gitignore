@@ -52,5 +52,6 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
-# uv (optional: uncomment to ignore lock file)
-# uv.lock
+# uv (not used here -- the project installs via venv + pip; see README)
+# The stale lock file was removed; ignore it so a stray `uv` run cannot re-add it.
+uv.lock

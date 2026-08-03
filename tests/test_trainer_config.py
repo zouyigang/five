@@ -9,6 +9,7 @@ from five.train.trainer import (
     apply_saved_config,
     cosine_lr_at,
     diff_reward_config,
+    resolve_opponent_kind,
 )
 
 
@@ -186,3 +187,55 @@ def test_resume_without_override_keeps_the_existing_curve(tmp_path):
     trainer = PPOTrainer(config, checkpoint_path=str(checkpoint))
 
     assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(expected, rel=1e-9)
+
+
+def test_historical_opponent_prob_no_longer_starves_self_play():
+    """回归：0.70 + 0.40 的全局阈值是 1.10 > roll 上界，曾导致自博弈占比恒为 0。"""
+    kinds = [
+        resolve_opponent_kind(roll / 1000, 0.70, 0.40, has_historical=True)
+        for roll in range(1000)
+    ]
+
+    assert kinds.count("heuristic") == 700
+    # 剩余 30% 中 40% 给历史对手，其余留给当前策略自博弈
+    assert kinds.count("historical") == 120
+    assert kinds.count("self") == 180
+
+
+def test_opponent_split_matches_legacy_semantics_when_no_heuristic():
+    """启发式占比为 0 时（训练早期），与原本的 0.4/0.6 语义完全一致。"""
+    kinds = [
+        resolve_opponent_kind(roll / 1000, 0.0, 0.40, has_historical=True)
+        for roll in range(1000)
+    ]
+
+    assert kinds.count("heuristic") == 0
+    assert kinds.count("historical") == 400
+    assert kinds.count("self") == 600
+
+
+def test_empty_opponent_pool_falls_back_to_self_play():
+    assert resolve_opponent_kind(0.99, 0.70, 0.40, has_historical=False) == "self"
+    assert resolve_opponent_kind(0.10, 0.70, 0.40, has_historical=False) == "heuristic"
+
+
+def test_self_play_share_stays_positive_across_the_whole_heuristic_ramp():
+    """任何启发式占比下都必须给当前策略留出份额，否则「自博弈」名不副实。"""
+    for percent in range(0, 100):
+        heuristic_prob = percent / 100
+        kinds = [
+            resolve_opponent_kind(roll / 1000, heuristic_prob, 0.40, has_historical=True)
+            for roll in range(1000)
+        ]
+        assert kinds.count("self") > 0, f"self-play starved at heuristic_prob={heuristic_prob}"
+
+
+def test_historical_prob_of_one_still_leaves_no_self_play_only_when_asked():
+    """historical_prob=1.0 表示「非启发式局全给历史对手」，这是显式选择。"""
+    kinds = [
+        resolve_opponent_kind(roll / 1000, 0.50, 1.0, has_historical=True)
+        for roll in range(1000)
+    ]
+
+    assert kinds.count("self") == 0
+    assert kinds.count("historical") == 500

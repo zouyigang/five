@@ -50,6 +50,35 @@ RESUME_SKIP_KEYS = frozenset(
 )
 
 
+def resolve_opponent_kind(
+    roll: float,
+    heuristic_prob: float,
+    historical_prob: float,
+    *,
+    has_historical: bool,
+) -> str:
+    """按一次 [0,1) 采样决定本局对手：'heuristic' / 'historical' / 'self'。
+
+    `historical_prob` 是**非启发式对局中**历史对手所占的比例，不是全局概率。
+
+    按全局概率写会失效：heuristic_prob=0.70 与 historical_prob=0.40 的累计阈值是
+    1.10，超过 roll 的上界 1.0，于是所有非启发式对局全部落给历史对手——与当前策略
+    的自博弈占比恒为 0，且 historical_prob 取任何 >=0.30 的值都毫无区别。
+    改成「剩余部分的比例」后三档恒定和为 1，自博弈始终有份额；在 heuristic_prob=0
+    时与原语义完全一致（历史 0.4 / 自博弈 0.6）。
+    """
+    heuristic_prob = min(max(heuristic_prob, 0.0), 1.0)
+    if roll < heuristic_prob:
+        return "heuristic"
+    if not has_historical:
+        return "self"
+    remaining = 1.0 - heuristic_prob
+    historical_share = remaining * min(max(historical_prob, 0.0), 1.0)
+    if roll < heuristic_prob + historical_share:
+        return "historical"
+    return "self"
+
+
 def cosine_lr_at(base_lr: float, eta_min: float, t_max: int, position: int) -> float:
     """CosineAnnealingLR 在第 position 步的闭式学习率（position=0 即 base_lr）。"""
     t_max = max(t_max, 1)
@@ -213,29 +242,28 @@ class PPOTrainer:
             batches: list[EpisodeBatch] = []
             total_game_length = 0
             position_metrics = _PositionMetricTotals()
+            epoch_opponent_counts = {"heuristic": 0, "historical": 0, "self": 0}
             for game_offset in range(self.config.self_play_games_per_epoch):
                 game_index = (epoch - 1) * self.config.self_play_games_per_epoch + game_offset + 1
                 black_engine = self.engine
                 white_engine = self.engine
                 tracked_players: set[int] | None = None
-                roll = random.random()
-                if roll < heuristic_prob:
+                opponent_kind = resolve_opponent_kind(
+                    random.random(),
+                    heuristic_prob,
+                    self.config.historical_opponent_prob,
+                    has_historical=historical_opponent is not None,
+                )
+                # 自博弈局不设 tracked_players（双方都记入训练）；对手局只记模型一方。
+                if opponent_kind != "self":
+                    opponent = heuristic_opponent if opponent_kind == "heuristic" else historical_opponent
                     if game_offset % 2 == 0:
-                        white_engine = heuristic_opponent
+                        white_engine = opponent
                         tracked_players = {1}
                     else:
-                        black_engine = heuristic_opponent
+                        black_engine = opponent
                         tracked_players = {-1}
-                elif (
-                    historical_opponent is not None
-                    and roll < heuristic_prob + self.config.historical_opponent_prob
-                ):
-                    if game_offset % 2 == 0:
-                        white_engine = historical_opponent
-                        tracked_players = {1}
-                    else:
-                        black_engine = historical_opponent
-                        tracked_players = {-1}
+                epoch_opponent_counts[opponent_kind] += 1
                 black_player_name = (
                     "model"
                     if black_engine is self.engine
@@ -357,7 +385,8 @@ class PPOTrainer:
                     "return_mean=%.4f return_std=%.4f return_abs_max=%.4f "
                     "eval_random=%.2f (b=%.2f w=%.2f) "
                     "eval_heuristic=%.2f (b=%.2f w=%.2f) "
-                    "opening_edge=%.3f opening_corner=%.3f opening_center=%.3f topk_edge=%.3f"
+                    "opening_edge=%.3f opening_corner=%.3f opening_center=%.3f topk_edge=%.3f "
+                    "opponents(heur/hist/self)=%d/%d/%d"
                 ),
                 epoch,
                 metric_record.policy_loss,
@@ -377,6 +406,9 @@ class PPOTrainer:
                 metric_record.opening_corner_rate,
                 metric_record.opening_center_rate,
                 metric_record.policy_topk_edge_rate,
+                epoch_opponent_counts["heuristic"],
+                epoch_opponent_counts["historical"],
+                epoch_opponent_counts["self"],
             )
 
     def _collect_position_metric_totals(self, result: SelfPlayResult) -> _PositionMetricTotals:
