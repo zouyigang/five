@@ -68,6 +68,8 @@ class PretrainPage(ttk.Frame):
             "lr": [],
         }
         self._last_mtime: float = 0
+        self._active = False
+        self._poll_after_id: str | None = None
         self._status_var = tk.StringVar(value="未检测到预训练任务（请用 five-pretrain 后台运行并指定输出目录）")
 
         # 进度文件（与训练监控一致：下拉框 + 刷新）
@@ -114,7 +116,16 @@ class PretrainPage(ttk.Frame):
         self.canvas = FigureCanvasTkAgg(self.figure, master=fig_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        self.after(800, self._poll_progress_file)
+    def set_active(self, active: bool) -> None:
+        """仅在当前标签页可见时轮询，避免后台绘图阻塞整个 Tk 主线程。"""
+        if active == self._active:
+            return
+        self._active = active
+        if active:
+            self._poll_progress_file()
+        elif self._poll_after_id is not None:
+            self.after_cancel(self._poll_after_id)
+            self._poll_after_id = None
 
     def _refresh_progress_files(self) -> None:
         values = _scan_pretrain_progress_files()
@@ -124,6 +135,9 @@ class PretrainPage(ttk.Frame):
             self._progress_path.set(values[0])
 
     def _poll_progress_file(self) -> None:
+        self._poll_after_id = None
+        if not self._active:
+            return
         path = self._progress_path.get().strip()
         if path:
             try:
@@ -137,7 +151,8 @@ class PretrainPage(ttk.Frame):
                         self._apply_progress(data)
             except (OSError, json.JSONDecodeError):
                 pass
-        self.after(800, self._poll_progress_file)
+        if self._active:
+            self._poll_after_id = self.after(800, self._poll_progress_file)
 
     def _apply_progress(self, data: dict) -> None:
         running = data.get("running", False)

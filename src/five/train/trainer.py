@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from five.ai.model import PolicyValueNet
 from five.ai.players import HeuristicPlayer
 from five.common.config import ModelConfig, RewardConfig, TrainingConfig
 from five.common.logging import configure_logging, get_logger
-from five.common.utils import set_seed
+from five.common.utils import set_seed, write_json
 from five.core.game import GomokuGame
 from five.storage.schemas import MetricRecord, ModelRecord
 from five.train.dataset import EpisodeBatch
@@ -27,6 +28,81 @@ from five.train.self_play import SelfPlayResult, play_self_play_game
 
 
 LOGGER = get_logger(__name__)
+
+
+# 续训时保留用户当前设置、不被 checkpoint 覆盖的键。
+RESUME_SKIP_KEYS = frozenset(
+    {
+        "epochs",  # 延长总轮数
+        "checkpoint_every",  # checkpoint 保存间隔
+        "device",  # 切换 GPU/CPU
+        "run_name",  # 新 run 名称
+        "runs_dir",  # 输出目录
+        "learning_rate",  # --learning-rate 微调
+        "batch_size",  # --batch-size
+        "self_play_games_per_epoch",  # --games-per-epoch
+        "eval_games",  # 评估局数
+        "eval_heuristic_temperature",  # 启发式评估温度，影响胜率曲线粒度
+        "heuristic_opponent_max_prob",
+        "heuristic_start_fraction",
+        "heuristic_ramp_fraction",
+    }
+)
+
+
+def cosine_lr_at(base_lr: float, eta_min: float, t_max: int, position: int) -> float:
+    """CosineAnnealingLR 在第 position 步的闭式学习率（position=0 即 base_lr）。"""
+    t_max = max(t_max, 1)
+    position = min(max(position, 0), t_max)
+    return eta_min + (base_lr - eta_min) * (1 + math.cos(math.pi * position / t_max)) / 2
+
+
+def _values_equal(left, right) -> bool:
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return abs(float(left) - float(right)) <= 1e-9
+    return left == right
+
+
+def diff_reward_config(saved_reward: dict, reward: RewardConfig) -> tuple[list[str], list[str]]:
+    """返回 (与 checkpoint 取值不同的字段, checkpoint 中尚不存在的新增字段)。"""
+    changed: list[str] = []
+    added: list[str] = []
+    for key in getattr(RewardConfig, "__dataclass_fields__", {}):
+        current = getattr(reward, key)
+        if key not in saved_reward:
+            added.append(f"{key}={current}")
+        elif not _values_equal(saved_reward[key], current):
+            changed.append(f"{key}: {saved_reward[key]} -> {current}")
+    return changed, added
+
+
+def apply_saved_config(
+    config: TrainingConfig,
+    saved: dict,
+    *,
+    reward_from_checkpoint: bool = False,
+) -> None:
+    """把 checkpoint 中的配置合并进 config，RESUME_SKIP_KEYS 里的键保留用户当前设置。
+
+    reward 默认**不**从 checkpoint 恢复：奖励参数是最常迭代的部分，若跟随 checkpoint，
+    改完 RewardConfig 再 --checkpoint 续训会静默不生效。需要复现旧 run 时传
+    reward_from_checkpoint=True。
+    """
+    skip_keys = set(RESUME_SKIP_KEYS)
+    if not reward_from_checkpoint:
+        skip_keys.add("reward")
+
+    for key, value in saved.items():
+        if key in skip_keys or not hasattr(config, key):
+            continue
+        if key == "model" and isinstance(value, dict):
+            subset = {k: v for k, v in value.items() if k in getattr(ModelConfig, "__dataclass_fields__", {})}
+            setattr(config, key, ModelConfig(**subset))
+        elif key == "reward" and isinstance(value, dict):
+            subset = {k: v for k, v in value.items() if k in getattr(RewardConfig, "__dataclass_fields__", {})}
+            setattr(config, key, RewardConfig(**subset))
+        else:
+            setattr(config, key, value)
 
 
 @dataclass(slots=True)
@@ -78,8 +154,15 @@ class _PositionMetricTotals:
 
 
 class PPOTrainer:
-    def __init__(self, config: TrainingConfig, checkpoint_path: str | None = None) -> None:
+    def __init__(
+        self,
+        config: TrainingConfig,
+        checkpoint_path: str | None = None,
+        *,
+        reward_from_checkpoint: bool = False,
+    ) -> None:
         self.config = config
+        self.reward_from_checkpoint = reward_from_checkpoint
         self.device = torch.device(config.device)
         self.game = GomokuGame(board_size=config.board_size, win_length=config.win_length)
         self.model = PolicyValueNet(
@@ -402,43 +485,67 @@ class PPOTrainer:
 
         if "config" in checkpoint:
             saved = checkpoint["config"]
-            # 继续训练时保留用户配置，不随 checkpoint 覆盖
-            skip_keys = {
-                "epochs",  # 延长总轮数
-                "checkpoint_every",  # checkpoint 保存间隔
-                "device",  # 切换 GPU/CPU
-                "run_name",  # 新 run 名称
-                "runs_dir",  # 输出目录
-                "learning_rate",  # --learning-rate 微调
-                "batch_size",  # --batch-size
-                "self_play_games_per_epoch",  # --games-per-epoch
-                "eval_games",  # 评估局数
-                "eval_heuristic_temperature",  # 启发式评估温度，影响胜率曲线粒度
-                "heuristic_opponent_max_prob",
-                "heuristic_start_fraction",
-                "heuristic_ramp_fraction",
-            }
-            for key, value in saved.items():
-                if key in skip_keys or not hasattr(self.config, key):
-                    continue
-                if key == "model" and isinstance(value, dict):
-                    subset = {k: v for k, v in value.items() if k in getattr(ModelConfig, "__dataclass_fields__", {})}
-                    setattr(self.config, key, ModelConfig(**subset))
-                elif key == "reward" and isinstance(value, dict):
-                    subset = {k: v for k, v in value.items() if k in getattr(RewardConfig, "__dataclass_fields__", {})}
-                    setattr(self.config, key, RewardConfig(**subset))
-                else:
-                    setattr(self.config, key, value)
+            self._log_reward_config_source(saved.get("reward"))
+            apply_saved_config(
+                self.config, saved, reward_from_checkpoint=self.reward_from_checkpoint
+            )
+            # create_run 在加载 checkpoint 之前就写过 config.json，那份是合并前的快照。
+            # 用合并后的配置覆盖，保证 run 目录记录的就是本次实际生效的配置。
+            write_json(self.artifacts.run_dir / "config.json", self.config.to_dict())
 
         self._start_epoch = int(checkpoint.get("epoch", 0)) + 1
-        last_epoch = self._start_epoch - 1
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=self.config.epochs, eta_min=self.config.lr_min, last_epoch=last_epoch
-        )
+        self._restore_lr_schedule(self._start_epoch - 1)
         LOGGER.info("Checkpoint loaded, resuming from epoch %s", self._start_epoch)
         self.model.eval()
 
         self._baseline = self._load_baseline_from_checkpoint(checkpoint_path)
+
+    def _restore_lr_schedule(self, last_epoch: int) -> None:
+        """把学习率重新锚定到当前 config.learning_rate，再从 last_epoch 处接上余弦调度。
+
+        `optimizer.load_state_dict` 会把 checkpoint 里的 lr / initial_lr 一并覆盖回来，而
+        CosineAnnealingLR 是按优化器当前 lr 递推的。不重锚会有两个后果：
+        1. 从 BC checkpoint 起步时，载入的是预训练余弦的谷底（默认 1e-5），PPO 会一直贴着它跑，
+           比配置的 3.5e-4 低一个多数量级；
+        2. 续训时 --learning-rate 完全失效，因为它敌不过 checkpoint 里的旧 lr。
+        """
+        base_lr = self.config.learning_rate
+        resumed_lr = cosine_lr_at(base_lr, self.config.lr_min, self.config.epochs, last_epoch)
+        for group in self.optimizer.param_groups:
+            group["initial_lr"] = base_lr
+            group["lr"] = resumed_lr
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=self.config.epochs,
+            eta_min=self.config.lr_min,
+            last_epoch=last_epoch,
+        )
+        LOGGER.info(
+            "LR schedule re-anchored to base=%.3e; epoch %s starts at lr=%.3e",
+            base_lr,
+            self._start_epoch,
+            self.optimizer.param_groups[0]["lr"],
+        )
+
+    def _log_reward_config_source(self, saved_reward: dict | None) -> None:
+        """把本次续训实际生效的奖励配置及其与 checkpoint 的差异记入日志，避免静默改变训练语义。"""
+        if not isinstance(saved_reward, dict):
+            LOGGER.info("Checkpoint carries no reward config; using the current RewardConfig.")
+            return
+
+        source = "checkpoint" if self.reward_from_checkpoint else "current config"
+        LOGGER.info("Reward config source: %s", source)
+        changed, added = diff_reward_config(saved_reward, self.config.reward)
+        if changed:
+            LOGGER.info("  differs from checkpoint (checkpoint -> current): %s", "; ".join(changed))
+        if added:
+            LOGGER.info("  fields absent from checkpoint, using defaults: %s", "; ".join(added))
+        if not changed and not added:
+            LOGGER.info("  identical to the checkpoint's reward config.")
+        elif self.reward_from_checkpoint and changed:
+            LOGGER.warning(
+                "  --reward-from-checkpoint is set: the differences above are overridden by the checkpoint."
+            )
 
     def _load_baseline_from_checkpoint(self, checkpoint_path: str) -> dict | None:
         """从 checkpoint 所在 run 的 metrics.csv 读取基线，写入新 run 的 baseline.json。"""
@@ -582,6 +689,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", type=str, default="ppo_gomoku_5080")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint file to resume training")
+    parser.add_argument(
+        "--reward-from-checkpoint",
+        action="store_true",
+        help=(
+            "Restore RewardConfig from the checkpoint instead of the current config. "
+            "Use it to reproduce an old run; by default reward changes take effect on resume."
+        ),
+    )
     parser.add_argument("--learning-rate", type=float, default=None, help="Learning rate (default: 3.5e-4)")
     parser.add_argument(
         "--heuristic-max-prob",
@@ -634,7 +749,11 @@ def main() -> None:
     if args.heuristic_ramp_fraction is not None:
         config.heuristic_ramp_fraction = args.heuristic_ramp_fraction
     set_seed(config.seed)
-    trainer = PPOTrainer(config, checkpoint_path=args.checkpoint)
+    trainer = PPOTrainer(
+        config,
+        checkpoint_path=args.checkpoint,
+        reward_from_checkpoint=args.reward_from_checkpoint,
+    )
     trainer.train()
 
 

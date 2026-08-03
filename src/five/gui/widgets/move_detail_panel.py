@@ -51,8 +51,7 @@ class MoveDetailPanel(ttk.Frame):
             if hasattr(move, 'reward_details') and move.reward_details:
                 self.text.insert(tk.END, "明细:\n")
                 for detail in move.reward_details:
-                    sign = "+" if detail.amount >= 0 else ""
-                    self.text.insert(tk.END, f"  {sign}{detail.amount:+.4f} - {detail.reason}\n")
+                    self.text.insert(tk.END, f"  {detail.amount:+.4f} - {detail.reason}\n")
             else:
                 self.text.insert(tk.END, "  （无明细数据）\n")
 

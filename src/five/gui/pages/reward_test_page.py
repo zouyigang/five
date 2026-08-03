@@ -40,6 +40,7 @@ class RewardTestPage(ttk.Frame):
         self.board = BoardCanvas(left_frame, show_coordinates=True)
         self.board.pack(fill=tk.BOTH, expand=True)
         self.board.set_click_handler(self.on_human_move)
+        self.board.set_right_click_handler(self.undo)
 
         middle_frame = ttk.Frame(left_frame)
         middle_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8)
@@ -62,7 +63,7 @@ class RewardTestPage(ttk.Frame):
         self.reward_text = tk.Text(right_frame, width=40, height=25, state="disabled")
         self.reward_text.pack(fill=tk.BOTH, expand=True)
 
-        self.status_var = tk.StringVar(value="点击棋盘落子，查看奖励计算明细。")
+        self.status_var = tk.StringVar(value="左键落子，右键回退一步。")
         ttk.Label(self, textvariable=self.status_var).pack(fill=tk.X, padx=8, pady=8)
 
         self.render()
@@ -74,7 +75,7 @@ class RewardTestPage(ttk.Frame):
         self.history_states = []
         self.total_reward_var.set("总奖励: 0.00")
         self.current_move_var.set("当前步: (, )")
-        self.status_var.set("点击棋盘落子，查看奖励计算明细。")
+        self.status_var.set("左键落子，右键回退一步。")
         self.render()
         self._clear_reward_details()
         self._clear_move_list()
@@ -97,6 +98,7 @@ class RewardTestPage(ttk.Frame):
         else:
             self.last_reward_result = None
             self.current_move_var.set("当前步: (, )")
+            self.total_reward_var.set("总奖励: 0.00")
             self._clear_reward_details()
         self.render()
         self._update_move_list()
@@ -149,8 +151,7 @@ class RewardTestPage(ttk.Frame):
 
         if reward_result.details:
             for detail in reward_result.details:
-                sign = "+" if detail.amount >= 0 else ""
-                self.reward_text.insert(tk.END, f"{sign}{detail.amount:+.4f} - {detail.reason}\n")
+                self.reward_text.insert(tk.END, f"{detail.amount:+.4f} - {detail.reason}\n")
         else:
             self.reward_text.insert(tk.END, "（无奖励项）\n")
 

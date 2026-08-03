@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import sys
 import tkinter as tk
 from typing import Callable
 
@@ -21,8 +23,11 @@ class BoardCanvas(tk.Canvas):
         self.pixel_size = pixel_size
         self.cell = pixel_size / max(board_size, 1)
         self.on_click_callback: Callable[[Move], None] | None = None
+        self.on_right_click_callback: Callable[[], None] | None = None
         self.show_coordinates = show_coordinates
         self.bind("<Button-1>", self._handle_click)
+        self.bind("<Button-3>", self._handle_right_click)
+        self.bind("<ButtonRelease-3>", self._handle_right_click_release)
 
     def set_board_size(self, board_size: int) -> None:
         self.board_size = board_size
@@ -59,6 +64,9 @@ class BoardCanvas(tk.Canvas):
 
     def set_click_handler(self, callback: Callable[[Move], None]) -> None:
         self.on_click_callback = callback
+
+    def set_right_click_handler(self, callback: Callable[[], None]) -> None:
+        self.on_right_click_callback = callback
 
     def _draw_grid(self) -> None:
         pad = self.cell / 2
@@ -116,3 +124,39 @@ class BoardCanvas(tk.Canvas):
         row = int(event.y // self.cell)
         if 0 <= row < self.board_size and 0 <= col < self.board_size:
             self.on_click_callback(Move(row=row, col=col))
+
+    def _handle_right_click(self, _event) -> str | None:
+        if self.on_right_click_callback is None:
+            return None
+        # 按下时立即回退，消除等待用户松开鼠标造成的体感延时。
+        self.on_right_click_callback()
+        # 不等事件循环回到空闲，立刻把重绘任务刷到屏幕。
+        self.winfo_toplevel().update_idletasks()
+        return "break"
+
+    def _handle_right_click_release(self, _event) -> str | None:
+        if self.on_right_click_callback is None:
+            return None
+        # 释放时只补交显示任务，不再次执行回退。
+        self._force_window_repaint()
+        return "break"
+
+    def _force_window_repaint(self) -> None:
+        toplevel = self.winfo_toplevel()
+        toplevel.update_idletasks()
+        # Windows 可能在右键捕获期间丢弃已提交的绘制，而 Tk 认为画过了不会再补，
+        # 表现为松开后棋盘/落子列表停留在旧画面，直到下一次事件才刷新。
+        # 这里通过 Win32 强制整棵窗口树无条件重绘一遍，不依赖 Tk 的待绘状态。
+        if sys.platform == "win32":
+            hwnd = toplevel.winfo_id()
+            if not hwnd:
+                return
+            RDW_INVALIDATE = 0x0001
+            RDW_ALLCHILDREN = 0x0080
+            RDW_UPDATENOW = 0x0100
+            try:
+                ctypes.windll.user32.RedrawWindow(
+                    hwnd, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW
+                )
+            except OSError:
+                pass

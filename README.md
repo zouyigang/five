@@ -34,7 +34,7 @@
 - GUI 中的奖励检验页可以：
   - 在空盘或任意局面下点击落子，即时查看该步的奖励明细。
   - 明细包含：形成活四/冲四/活三/跳活三/眠三、封堵对方活四/冲四/活三等、未化解对方威胁、错失直接获胜落点等；终局步会显示完整奖励（含终局获胜奖励）。
-  - 支持新对局、回退；回退后当前玩家会正确恢复。
+  - 支持新对局、按钮回退和棋盘右键快速回退；回退后当前玩家会正确恢复。
 
 ### 人机对弈
 - GUI 中的人机对弈页可以：
@@ -48,33 +48,75 @@
 ### 1. 基础环境
 
 - Python 版本：**3.11+**
-- 推荐使用虚拟环境（`venv`、`conda` 等）。
+- 推荐使用独立虚拟环境（`venv`、`conda` 等）。
+- 本项目已在 Windows 11、Python 3.14.6、RTX 5080、PyTorch 2.13.0+cu130 下验证。
+
+创建虚拟环境前先运行 `python --version`，确认当前解释器符合要求。下面的 `python -m venv .venv` **只在 `.venv` 不存在时执行一次**；如果 `.venv` 已存在，请跳过创建命令并直接激活。不要使用另一个 Python 版本覆盖已有环境。
+
+Windows PowerShell：
+
+```powershell
+cd E:\PycharmProjects\five
+if (-not (Test-Path .venv)) { python -m venv .venv }
+.\.venv\Scripts\Activate.ps1
+```
+
+Windows CMD：
+
+```cmd
+cd /d E:\PycharmProjects\five
+if not exist .venv python -m venv .venv
+.\.venv\Scripts\activate.bat
+```
+
+> `Activate.ps1` 只能在 PowerShell 中执行；CMD 请使用 `activate.bat`。激活成功后，命令提示符前会显示 `(.venv)`。
+
+Linux/macOS：
 
 ```bash
-cd E:\PycharmProjects\five
-python -m venv .venv
-.venv\Scripts\activate   # Windows
-# source .venv/bin/activate  # Linux/macOS
+[ -d .venv ] || python -m venv .venv
+source .venv/bin/activate
 ```
 
 ### 2. 安装依赖（推荐可编辑安装）
 
-```bash
-pip install -e .
+安装项目和测试依赖：
+
+```powershell
+python -m pip install -e ".[test]"
 ```
 
-这会安装核心依赖并注册四个命令行入口：
+PyPI 默认安装的 PyTorch 可能不包含 CUDA。使用 NVIDIA GPU 训练时，请按显卡驱动和操作系统选择
+[PyTorch 官方安装源](https://pytorch.org/get-started/locally/)。本机已验证的 CUDA 13.0 安装命令为：
+
+```powershell
+python -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/cu130
+```
+
+安装后验证环境：
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+python -m pytest -q
+```
+
+CPU 环境可以正常运行 GUI、测试和小规模训练，但训练命令必须显式传入 `--device cpu`。项目默认训练设备为 `cuda`。
+
+安装会注册五个命令行入口：
 
 | 命令 | 说明 |
 |------|------|
 | `five-train` | PPO 自博弈训练 |
 | `five-generate` | 生成启发式自博弈数据集 |
 | `five-pretrain` | 行为克隆预训练 |
-| `five-gui` | 启动 GUI（PPO 微调 / 回放 / 人机对弈 / 奖励检验） |
+| `five-export-human-games` | 导出带人工标注的对局训练数据 |
+| `five-gui` | 启动 GUI（数据生成 / 行为克隆预训练 / PPO 微调 / 回放 / 人机对弈 / 奖励检验） |
 
 核心依赖：`torch>=2.2`、`numpy>=1.26`、`pandas>=2.2`、`matplotlib>=3.8`。
 
 ## 快速开始
+
+以下命令假设已经进入项目根目录并激活虚拟环境，无需在每个步骤中重复激活。
 
 ### 方式 A：从零开始 PPO 训练
 
@@ -89,23 +131,23 @@ five-train --board-size 9 --epochs 600 --games-per-epoch 384 --run-name ppo_gomo
 **第 1 步：生成启发式自博弈数据**
 
 ```bash
-five-generate --games 20000 --board-size 9 --output data/heuristic_20k.pt
+five-generate --games 50000 --board-size 9 --output data/heuristic_50k.pt
 ```
 
-HeuristicPlayer 会自动对弈 20000 局，每步根据棋形评分选择最优落子。输出约 50 万条 `(state, action, value)` 样本。
+HeuristicPlayer 会自动对弈 50000 局，每步根据棋形评分选择落子，通常可生成数百万条 `(state, action, value)` 样本。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--games` | 20000 | 自博弈局数 |
+| `--games` | 50000 | 自博弈局数 |
 | `--board-size` | 9 | 棋盘大小 |
 | `--win-length` | 5 | 连珠数 |
-| `--output` | `data/heuristic_20k.pt` | 输出文件路径 |
+| `--output` | `data/heuristic_50k.pt` | 输出文件路径 |
 | `--seed` | 42 | 随机种子 |
 
 **第 2 步：行为克隆预训练**
 
 ```bash
-five-pretrain --dataset data/heuristic_20k.pt --epochs 15 --lr 1e-3 --output-dir pretrain_output
+five-pretrain --dataset data/heuristic_50k.pt --epochs 30 --lr 1e-3 --output-dir pretrain_output
 ```
 
 用交叉熵损失模仿启发式专家的落子选择，同时用 MSE 拟合胜负结果。训练结束后在 `pretrain_output/` 生成 `best_bc.pt`（验证最优）和 `final_bc.pt`（最终轮次）。
@@ -116,7 +158,7 @@ five-pretrain --dataset data/heuristic_20k.pt --epochs 15 --lr 1e-3 --output-dir
 | `--board-size` | 9 | 棋盘大小 |
 | `--channels` | 256 | 网络通道数（须与 PPO 配置一致） |
 | `--blocks` | 16 | 残差块数量（须与 PPO 配置一致） |
-| `--epochs` | 15 | 预训练轮数 |
+| `--epochs` | 30 | 预训练轮数 |
 | `--batch-size` | 1024 | 批大小 |
 | `--lr` | 1e-3 | 初始学习率 |
 | `--value-coef` | 0.5 | 价值损失权重 |
@@ -137,7 +179,9 @@ five-train --checkpoint pretrain_output/best_bc.pt --epochs 600 --run-name ppo_f
 five-gui
 ```
 
-GUI 包含四个标签页：
+GUI 包含六个标签页：
+- **数据生成**：读取生成进度文件，查看胜负统计和逐局棋谱。
+- **行为克隆预训练**：读取预训练进度文件，展示损失、准确率和学习率曲线。
 - **PPO 微调**：选择某个 run 后实时展示 policy/value loss、entropy、平均对局长度、评估胜率等 10 项指标。
 - **对局回放**：选择 run 和 game，逐手播放，右侧展示步级详情（执子方、落点、动作概率、价值估计、候选落点 Top-K、奖励明细）。
 - **人机对弈**：选择 checkpoint、执子颜色和 AI 思考模式，与训练好的模型对弈。
@@ -186,7 +230,9 @@ five/
 │   │   ├── app.py           # FiveApp 主应用
 │   │   ├── controllers.py   # GUI 控制逻辑
 │   │   ├── viewmodels.py    # 视图模型
-│   │   ├── pages/           # 四个功能页
+│   │   ├── pages/           # 六个功能页
+│   │   │   ├── generate_page.py  # 数据生成进度与棋谱
+│   │   │   ├── pretrain_page.py  # 行为克隆预训练监控
 │   │   │   ├── train_page.py     # PPO 微调监控
 │   │   │   ├── replay_page.py    # 对局回放
 │   │   │   ├── versus_ai_page.py # 人机对弈
@@ -204,7 +250,7 @@ five/
 │   ├── test_reward.py       # 奖励函数测试
 │   └── test_threat_shapes.py # 棋形检测测试
 ├── data/                    # 预训练数据（生成后出现）
-│   └── heuristic_20k.pt
+│   └── heuristic_50k.pt
 ├── pretrain_output/         # 预训练 checkpoint（训练后出现）
 │   ├── best_bc.pt
 │   └── final_bc.pt
@@ -225,16 +271,16 @@ five/
 ┌─────────────────────────────────────────────────────────┐
 │ 第 1 阶段：数据生成                                       │
 │                                                         │
-│   five-generate --games 20000                           │
+│   five-generate --games 50000                           │
 │       HeuristicPlayer vs HeuristicPlayer                │
-│       输出: data/heuristic_20k.pt                        │
+│       输出: data/heuristic_50k.pt                        │
 └───────────────────────┬─────────────────────────────────┘
                         │
                         ▼
 ┌─────────────────────────────────────────────────────────┐
 │ 第 2 阶段：行为克隆预训练                                  │
 │                                                         │
-│   five-pretrain --dataset data/heuristic_20k.pt         │
+│   five-pretrain --dataset data/heuristic_50k.pt         │
 │       CrossEntropy(policy) + MSE(value)                 │
 │       输出: pretrain_output/best_bc.pt                   │
 └───────────────────────┬─────────────────────────────────┘
@@ -253,13 +299,13 @@ five/
 │ 使用与评估                                               │
 │                                                         │
 │   five-gui                                              │
-│       PPO 微调 │ 对局回放 │ 人机对弈 │ 奖励检验             │
+│       数据生成 │ 预训练 │ PPO 微调 │ 回放 │ 人机 │ 奖励检验    │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ## 训练配置详解
 
-所有配置集中在 `src/five/common/config.py`，分为四个 dataclass：
+所有配置集中在 `src/five/common/config.py`，分为六个 dataclass：
 
 ### RewardConfig — 奖励函数参数
 
@@ -281,10 +327,14 @@ five/
 | `outcome_decay` | 0.85 | 终局回传衰减系数 |
 | `outcome_horizon` | 6 | 终局回传覆盖步数 |
 | `miss_immediate_win_penalty` | 2.8 | 未阻止对方制胜手惩罚 |
-| `miss_own_immediate_win_penalty` | 1.2 | 错失己方直接获胜惩罚 |
-| `miss_own_open_four_penalty` | 1.0 | 错失己方活四惩罚 |
-| `miss_rush_four_penalty` | 1.2 | 未化解对方冲四惩罚 |
-| `miss_open_three_penalty` | 0.6 | 未压制对方活三惩罚 |
+| `miss_own_immediate_win_penalty` | 2.5 | 错失己方直接获胜惩罚 |
+| `miss_own_open_four_penalty` | 2.0 | 错失己方形成活四机会的惩罚 |
+| `miss_open_three_penalty` | 2.2 | 未压制对方一步成活四机会的惩罚 |
+| `miss_jump_open_three_penalty` | 2.0 | 未压制对方跳活三机会的惩罚 |
+| `miss_one_move_four_three_penalty` | 2.2 | 未阻止对方一步形成四三的惩罚 |
+| `miss_one_move_double_three_penalty` | 2.0 | 未阻止对方一步形成双活三的惩罚 |
+| `counter_threat_waiver_scale` | 0.5 | 本手成活三/跳活三时，对「一手成四三/双活三」漏防惩罚的折减系数（1.0 = 不折减） |
+| `rush_four_waiver_attack_scale` | 0.3 | 冲四靠强攻豁免免掉漏防惩罚时，其进攻分的折减系数（1.0 = 不折减） |
 
 ### ModelConfig — 网络架构
 
@@ -320,7 +370,7 @@ five/
 | `heuristic_start_fraction` | 0.0 | 启发式占比开始爬升前跳过的轮次比例（0 表示从第 1 轮就有） |
 | `heuristic_ramp_fraction` | 0.08 | 从零爬升到峰值所经历的轮次比例 |
 | `eval_games` | 48 | 每轮评估局数 |
-| `checkpoint_every` | 2 | checkpoint 保存间隔 |
+| `checkpoint_every` | 20 | checkpoint 保存间隔 |
 
 ### GUIConfig — 界面参数
 
@@ -328,7 +378,29 @@ five/
 |------|--------|------|
 | `window_width` | 1300 | 窗口宽度 |
 | `window_height` | 800 | 窗口高度 |
-| `poll_interval_ms` | 500 | 轮询间隔 |
+| `poll_interval_ms` | 2000 | 轮询间隔 |
+
+### GenerateConfig — 启发式数据生成参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `games` | 50000 | 自博弈局数 |
+| `board_size` | 9 | 棋盘大小 |
+| `win_length` | 5 | 连珠数 |
+| `output` | `data/heuristic_50k.pt` | 数据集输出路径 |
+| `seed` | 42 | 随机种子 |
+
+### PretrainConfig — 行为克隆预训练参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `dataset` | `data/heuristic_50k.pt` | 输入数据集 |
+| `channels` | 256 | 卷积通道数 |
+| `blocks` | 16 | 残差块数量 |
+| `epochs` | 30 | 训练轮数 |
+| `batch_size` | 1024 | 批大小 |
+| `lr` | 1e-3 | 初始学习率 |
+| `device` | `cuda` | 训练设备 |
 
 ## 命令行参考
 
@@ -347,8 +419,8 @@ five-train [--board-size 9] [--epochs 600] [--games-per-epoch 384]
 在终端后台运行生成，GUI 的「数据生成」页会按进度文件实时刷新进度，并支持分页查看每局详情。
 
 ```bash
-five-generate [--games 20000] [--board-size 9] [--win-length 5]
-              [--output data/heuristic_20k.pt]
+five-generate [--games 50000] [--board-size 9] [--win-length 5]
+              [--output data/heuristic_50k.pt]
               [--progress-file PATH] [--games-detail-file PATH] [--seed 42]
 ```
 
@@ -360,7 +432,7 @@ five-generate [--games 20000] [--board-size 9] [--win-length 5]
 
 ```bash
 five-pretrain --dataset PATH [--board-size 9] [--channels 256] [--blocks 16]
-              [--epochs 15] [--batch-size 1024] [--lr 1e-3]
+              [--epochs 30] [--batch-size 1024] [--lr 1e-3]
               [--value-coef 0.5] [--device cuda] [--output-dir pretrain_output]
               [--progress-file PATH]
 ```
@@ -371,6 +443,12 @@ five-pretrain --dataset PATH [--board-size 9] [--channels 256] [--blocks 16]
 
 ```bash
 five-gui
+```
+
+### `five-export-human-games` — 导出人工标注数据
+
+```bash
+five-export-human-games --run-dir runs/<run_id> [--output data/human_marked.pt]
 ```
 
 ## 训练数据与对局记录格式
@@ -393,10 +471,10 @@ five-gui
 | 棋形 | 基础分 | 说明 |
 |------|--------|------|
 | 成五 | 100 | 直接获胜（由终局奖励体现） |
-| 活四 | 45 | 四子连、两端空 |
-| 双四 | 55 | 一手形成两个四 |
-| 冲四活三/四三 | 40 | 同时形成四与活三 |
-| 双活三 | 35 | 一手形成两个活三 |
+| 活四 | 65 | 四子连、两端空 |
+| 双四 | 75 | 一手形成两个四 |
+| 冲四活三/四三 | 60 | 同时形成四与活三 |
+| 双活三 | 55 | 一手形成两个活三 |
 | 冲四/跳四 | 20 | 四子连或跳四、一端堵 |
 | 活三 | 10 | 三子连、两端空 |
 | 跳活三 | 7 | 三子跳、两端空 |
@@ -408,9 +486,25 @@ five-gui
 
 只统计对方**已有**的威胁。本手落在可化解威胁的格点上，按棋形类型 × `block_scale` 加分（含封堵对方活四，与其它封堵类一致）。
 
+威胁**按实例计数**，而非"有/无"的布尔标志。同一条线上的同一组棋子只算一个威胁（扫描时会被其中每颗子各识别一次，按"方向 + 棋子集合"归并去重）。因此：
+
+- 对方有两个不相交的活三时，堵掉其中一个能拿到一份封堵奖励，而不是因为"堵完仍有活三"就一分不给；
+- 一手同时化解两个威胁，按 `x2` 计分。
+
 ### 漏防惩罚
 
-对方已有活四/冲四/活三等威胁，本手未落在化解位置则扣分。惩罚幅度小于赢棋奖励，避免过度消极防守。
+对方已有活四/冲四/活三等威胁，本手未落在化解位置则扣分，扣分额**随未化解的威胁个数线性放大**（未堵两个活三扣两份）。惩罚幅度小于赢棋奖励，避免过度消极防守。
+
+**豁免层级**（区别来自棋理，不是调参）：
+
+| 本手棋型 | 先手性质 | 对漏防惩罚的作用 |
+|---|---|---|
+| 冲四及以上（`my_strong_attack`） | 绝对先手：唯一挡点，对方必应且无法反击 | **全额豁免** |
+| 活三 / 跳活三（`my_counter_threat`） | 相对先手：对方可用一手兼具封堵与反击化解 | 按 `counter_threat_waiver_scale`（0.5）**部分豁免** |
+
+仅能成冲四的活三不计入反击先手——它无法成活四，构不成真正的牵制。
+
+豁免生效时，**光杆冲四的进攻分按 `rush_four_waiver_attack_scale`（0.3）折减**。豁免本身成立，但若同时全额保留进攻分，"远处随手冲四 + 免责"的净收益为正，会成为刷分燃料：模型可以攒一批无用冲四轮流点，每手净赚，把真正的防守决策无限延后。活四/双四/四三/双活三本身近乎制胜，不折减。
 
 ### 错失己方赢棋点惩罚
 
@@ -427,6 +521,10 @@ five-gui
 - 致胜一手给 `final_win_reward`（3.0）。
 - 最后 `outcome_horizon`（6）步内按距终局的距离做衰减的胜负 bonus。
 - 错失直接获胜的步跳过 outcome tail bonus，避免正奖励冲抵惩罚。
+
+### 奖励明细
+
+每一项奖惩都会追加一条 `RewardDetail(amount, reason)`，**明细金额之和恒等于该步总分**。这条不变量由模糊测试覆盖，是奖励检验页与回放页步级详情可信的前提——总分被调整却不写明细（或写了未参与总分的明细）会让审计结果失真。开局位置分在对手有威胁时会被压制，此时明细记录的是**压制后**的金额。
 
 ## 训练曲线图解读
 
@@ -445,8 +543,11 @@ GUI「PPO 微调」页展示原始曲线（浅色）+ 滚动均值（深色）�
 ## 测试
 
 ```bash
+# 首次安装测试依赖
+python -m pip install -e ".[test]"
+
 # 运行全部测试
-python -m pytest tests/ -v
+python -m pytest -q
 
 # 单独运行奖励测试
 python -m pytest tests/test_reward.py -v

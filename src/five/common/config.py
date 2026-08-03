@@ -58,7 +58,7 @@ class RewardConfig:
     block_restricted_open_three_score: float = 40.0
 
     # ---------- 错失 ---------- 己方有机会未把握的惩罚
-    # miss_own_immediate_win_penalty=2.5 确保错失直接获胜时总为负（含封堵活四），见 docs/reward_strict_miss_win_scheme.md
+    # miss_own_immediate_win_penalty=2.5 确保错失直接获胜时总为负（含封堵活四）
     miss_own_immediate_win_penalty: float = 2.5
     # 需 > 封堵活三奖励(50*0.035=1.75)，确保错失形成活四时总为负
     miss_own_open_four_penalty: float = 2.0
@@ -69,6 +69,19 @@ class RewardConfig:
     miss_jump_open_three_penalty: float = 2.0
     miss_one_move_four_three_penalty: float = 2.2
     miss_one_move_double_three_penalty: float = 2.0
+    # ---------- 反击先手折减 ----------
+    # 本手形成活三/跳活三时，对「未阻止对方一手成双活三/四三」的惩罚折减系数。
+    # 冲四是绝对先手（唯一挡点，对方必应且无法反击），故 my_strong_attack 全额豁免；
+    # 活三只是相对先手（对方可用一手兼具封堵与反击来化解），故只部分豁免。
+    # 取 1.0 等于关闭折减，取 0.0 等于与冲四同级全额豁免。
+    counter_threat_waiver_scale: float = 0.5
+    # ---------- 强攻豁免时的进攻分折减 ----------
+    # 冲四豁免漏防在棋理上成立（绝对先手），但若同时全额保留冲四的进攻分，
+    # 「远处随手冲四 + 全额豁免」净收益为正，会变成刷分燃料：模型可以攒一堆无用冲四
+    # 轮流点，每手净赚，把真正的防守决策无限延后。故豁免生效时折减冲四的进攻分。
+    # 只作用于冲四：活四/双四/四三/双活三本身近乎制胜，不折减。
+    # 取 1.0 等于关闭折减。
+    rush_four_waiver_attack_scale: float = 0.3
 
 
 @dataclass(slots=True)

@@ -185,97 +185,87 @@ def find_winning_moves(board: Board, player: int) -> list[Move]:
     return winning_moves
 
 
-def find_living_three_moves(board: Board, player: int) -> list[Move]:
-    """Find moves that would create a living three for the player."""
-    living_three_moves = []
-    for move in board.legal_moves():
-        board.grid[move.row, move.col] = player
-        threat = get_threat_info(board, move, player)
-        board.grid[move.row, move.col] = 0
-
-        if threat.living_threes > 0:
-            living_three_moves.append(move)
-
-    return living_three_moves
+# 细分棋型 -> 计分口径。跳活四与冲四同档，沿用二值化时期的归类。
+_THREAT_KIND_TO_CATEGORY: dict[str, str] = {
+    "living_four": "open_four",
+    "blocked_four": "rush_four",
+    "jump_living_four": "rush_four",
+    "jump_blocked_four": "rush_four",
+    "living_three": "open_three",
+    "jump_living_three": "jump_open_three",
+    "restricted_living_three": "restricted_open_three",
+}
 
 
-def find_blocked_four_moves(board: Board, player: int) -> list[Move]:
-    """Find moves that would create a blocked four for the player."""
-    blocked_four_moves = []
-    for move in board.legal_moves():
-        board.grid[move.row, move.col] = player
-        threat = get_threat_info(board, move, player)
-        board.grid[move.row, move.col] = 0
+@dataclass(frozen=True, slots=True)
+class ThreatInstance:
+    """一个已成立的威胁实例。
 
-        if threat.blocked_fours > 0:
-            blocked_four_moves.append(move)
-
-    return blocked_four_moves
-
-
-def find_jump_living_three_moves(board: Board, player: int) -> list[Move]:
-    """Find moves that would create a jump living three for the player."""
-    jump_living_three_moves = []
-    for move in board.legal_moves():
-        board.grid[move.row, move.col] = player
-        threat = get_threat_info(board, move, player)
-        board.grid[move.row, move.col] = 0
-
-        if threat.jump_living_threes > 0:
-            jump_living_three_moves.append(move)
-
-    return jump_living_three_moves
-
-
-def find_jump_blocked_four_moves(board: Board, player: int) -> list[Move]:
-    """Find moves that would create a jump blocked four for the player."""
-    jump_blocked_four_moves = []
-    for move in board.legal_moves():
-        board.grid[move.row, move.col] = player
-        threat = get_threat_info(board, move, player)
-        board.grid[move.row, move.col] = 0
-
-        if threat.jump_blocked_fours > 0:
-            jump_blocked_four_moves.append(move)
-
-    return jump_blocked_four_moves
-
-
-def find_jump_living_four_moves(board: Board, player: int) -> list[Move]:
-    """Find moves that would create a jump living four for the player."""
-    jump_living_four_moves = []
-    for move in board.legal_moves():
-        board.grid[move.row, move.col] = player
-        threat = get_threat_info(board, move, player)
-        board.grid[move.row, move.col] = 0
-
-        if threat.jump_living_fours > 0:
-            jump_living_four_moves.append(move)
-
-    return jump_living_four_moves
-
-
-def scan_existing_threats(
-    board: Board, player: int
-) -> tuple[
-    list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]],
-    list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]],
-    list[tuple[int, int]],
-]:
+    `stones` + `direction` 唯一标识它：同一条线上的同一组棋子，无论从其中哪颗子
+    扫描到，都归并为同一个实例。`block_cells` 是能化解它的格点。
     """
-    Scan the board for existing threats including jump threats.
-    Returns: (living_four_positions, blocked_four_positions, living_three_positions,
-              jump_living_four_positions, jump_blocked_four_positions, jump_living_three_positions,
-              restricted_living_three_positions)
-    Jump 活三 always has 活四 at the jump cell, so no restricted_jump. Each position is (row, col).
+
+    kind: str
+    stones: frozenset[tuple[int, int]]
+    direction: tuple[int, int]
+    block_cells: tuple[tuple[int, int], ...]
+
+    @property
+    def category(self) -> str:
+        return _THREAT_KIND_TO_CATEGORY[self.kind]
+
+
+def _classify_threat_line(
+    board: Board,
+    stone_count: int,
+    empty_with_dir: list[tuple[int, int, int, int]],
+    jump_positions: list[tuple[int, int]],
+    blocked_ends: int,
+) -> tuple[str, tuple[tuple[int, int], ...]] | None:
+    """把一次线扫描的结果归类为 (细分棋型, 化解格点)；不构成威胁时返回 None。"""
+    has_jump = bool(jump_positions)
+    empty_cells = tuple((row, col) for (row, col, _dr, _dc) in empty_with_dir)
+
+    if stone_count == 4:
+        if has_jump:
+            block_cells = tuple(jump_positions)
+            if len(empty_with_dir) == 2:
+                return "jump_living_four", block_cells
+            if len(empty_with_dir) == 1 and blocked_ends == 1:
+                return "jump_blocked_four", block_cells
+            return None
+        if len(empty_with_dir) == 2:
+            return "living_four", empty_cells
+        if len(empty_with_dir) == 1 and blocked_ends == 1:
+            return "blocked_four", empty_cells
+        return None
+
+    if stone_count == 3 and len(empty_with_dir) == 2:
+        block_cells = empty_cells + tuple(jump_positions)
+        if has_jump:
+            # 跳活三：中间填跳必成活四，不区分 restricted
+            return "jump_living_three", block_cells
+        extendable = sum(
+            1
+            for (row, col, out_dr, out_dc) in empty_with_dir
+            if in_bounds(board.size, row + out_dr, col + out_dc)
+            and board.grid[row + out_dr, col + out_dc] == 0
+        )
+        if extendable == 0:
+            return "restricted_living_three", block_cells
+        return "living_three", block_cells
+
+    return None
+
+
+def scan_threat_instances(board: Board, player: int) -> list[ThreatInstance]:
+    """全盘扫描 player 已成立的威胁，按**实例**返回（而非按化解格点）。
+
+    同一条线上的同一组棋子会被其中每一颗子各扫描到一次，这里用 (方向, 棋子集合)
+    规范化去重。因此「两个不相交的活三」会得到 2 个实例，而不是被压成一个布尔位——
+    这是「堵掉两个活三之一」能拿到封堵奖励的前提。
     """
-    living_four_positions = []
-    blocked_four_positions = []
-    living_three_positions = []
-    jump_living_four_positions = []
-    jump_blocked_four_positions = []
-    jump_living_three_positions = []
-    restricted_living_three_positions = []
+    instances: dict[tuple[tuple[int, int], frozenset[tuple[int, int]]], ThreatInstance] = {}
 
     for delta_row, delta_col in DIRECTIONS:
         for row in range(board.size):
@@ -322,103 +312,24 @@ def scan_existing_threats(
 
                     jump_count += dir_jump_count
 
-                total_count = 1 + len(positions)
-                has_jump = len(jump_positions) > 0
+                classified = _classify_threat_line(
+                    board, 1 + len(positions), empty_with_dir, jump_positions, blocked_ends
+                )
+                if classified is None:
+                    continue
+                kind, block_cells = classified
+                stones = frozenset([(row, col), *positions])
+                key = ((delta_row, delta_col), stones)
+                if key in instances:
+                    continue
+                instances[key] = ThreatInstance(
+                    kind=kind,
+                    stones=stones,
+                    direction=(delta_row, delta_col),
+                    block_cells=block_cells,
+                )
 
-                if total_count == 4:
-                    if has_jump:
-                        if len(empty_with_dir) == 2:
-                            for pos in jump_positions:
-                                if pos not in jump_living_four_positions:
-                                    jump_living_four_positions.append(pos)
-                        elif len(empty_with_dir) == 1 and blocked_ends == 1:
-                            for pos in jump_positions:
-                                if pos not in jump_blocked_four_positions:
-                                    jump_blocked_four_positions.append(pos)
-                    else:
-                        if len(empty_with_dir) == 2:
-                            for e in empty_with_dir:
-                                pos = (e[0], e[1])
-                                if pos not in living_four_positions:
-                                    living_four_positions.append(pos)
-                        elif len(empty_with_dir) == 1 and blocked_ends == 1:
-                            for e in empty_with_dir:
-                                pos = (e[0], e[1])
-                                if pos not in blocked_four_positions:
-                                    blocked_four_positions.append(pos)
-                elif total_count == 3 and len(empty_with_dir) == 2:
-                    block_cells = [(e[0], e[1]) for e in empty_with_dir] + list(jump_positions)
-                    if has_jump:
-                        # 跳活三：中间填跳必成活四，不区分 restricted
-                        for pos in block_cells:
-                            if pos not in jump_living_three_positions:
-                                jump_living_three_positions.append(pos)
-                    else:
-                        extendable = sum(
-                            1
-                            for (r, c, odr, odc) in empty_with_dir
-                            if in_bounds(board.size, r + odr, c + odc) and board.grid[r + odr, c + odc] == 0
-                        )
-                        if extendable == 0:
-                            for pos in block_cells:
-                                if pos not in restricted_living_three_positions:
-                                    restricted_living_three_positions.append(pos)
-                        else:
-                            for pos in block_cells:
-                                if pos not in living_three_positions:
-                                    living_three_positions.append(pos)
-
-    return (
-        living_four_positions,
-        blocked_four_positions,
-        living_three_positions,
-        jump_living_four_positions,
-        jump_blocked_four_positions,
-        jump_living_three_positions,
-        restricted_living_three_positions,
-    )
-
-
-def find_existing_living_four_moves(board: Board, player: int) -> list[Move]:
-    """Find positions that would block an existing living four for the player."""
-    living_fours, _, _, _, _, _, _ = scan_existing_threats(board, player)
-    return [Move(row, col) for row, col in living_fours]
-
-
-def find_existing_blocked_four_moves(board: Board, player: int) -> list[Move]:
-    """Find positions that would block an existing blocked four for the player."""
-    _, blocked_fours, _, _, _, _, _ = scan_existing_threats(board, player)
-    return [Move(row, col) for row, col in blocked_fours]
-
-
-def find_existing_living_three_moves(board: Board, player: int) -> list[Move]:
-    """Find positions that would block an existing living three (能成活四) for the player."""
-    _, _, living_threes, _, _, _, _ = scan_existing_threats(board, player)
-    return [Move(row, col) for row, col in living_threes]
-
-
-def find_existing_jump_living_four_moves(board: Board, player: int) -> list[Move]:
-    """Find positions that would block an existing jump living four for the player."""
-    _, _, _, jump_living_fours, _, _, _ = scan_existing_threats(board, player)
-    return [Move(row, col) for row, col in jump_living_fours]
-
-
-def find_existing_jump_blocked_four_moves(board: Board, player: int) -> list[Move]:
-    """Find positions that would block an existing jump blocked four for the player."""
-    _, _, _, _, jump_blocked_fours, _, _ = scan_existing_threats(board, player)
-    return [Move(row, col) for row, col in jump_blocked_fours]
-
-
-def find_existing_jump_living_three_moves(board: Board, player: int) -> list[Move]:
-    """Find positions that would block an existing jump living three (中间填跳必成活四)."""
-    _, _, _, _, _, jump_living_threes, _ = scan_existing_threats(board, player)
-    return [Move(row, col) for row, col in jump_living_threes]
-
-
-def find_existing_restricted_living_three_moves(board: Board, player: int) -> list[Move]:
-    """Find positions that would block an existing restricted living three (仅能成冲四的连子活三)."""
-    _, _, _, _, _, _, restricted = scan_existing_threats(board, player)
-    return [Move(row, col) for row, col in restricted]
+    return list(instances.values())
 
 
 @dataclass(slots=True)
@@ -572,34 +483,23 @@ def _evaluate_move_features(board: Board, move: Move, player: int) -> ShapeFeatu
     return _extract_shape_features(threat)
 
 
-def _scan_threat_inventory(board: Board, player: int) -> ThreatInventory:
-    inventory = ThreatInventory()
-    for move in board.legal_moves():
-        features = _evaluate_move_features(board, move, player)
-        category = _primary_category(features)
-        if category is not None:
-            inventory.increment(category)
-    return inventory
-
-
 def _scan_existing_threat_inventory(board: Board, player: int) -> ThreatInventory:
+    """统计 player 已成立的威胁，基础棋型按**实例个数**计数。
+
+    计数化（而非 0/1）是「堵掉两个活三之一」能拿分的前提：二值化时 before/after
+    都是 1，差值为 0，那一手与完全不防守的得分完全相同。
+
+    两个例外保持二值：
+    - `immediate_win`——「能不能立刻被赢下」本就是二元判断；
+    - 复合项 `double_four`/`four_three`/`double_three`——描述的是「局面具备某种复合
+      形态」，对其计数没有棋理意义。它们现在由实例数推导，因此「两个直活三」也能
+      正确判为双活三（二值化时因两者同属 open_three 而合并成 1，判不出来）。
+    """
     inventory = ThreatInventory()
 
-    winning_moves = find_winning_moves(board, player)
-    living_four_moves = find_existing_living_four_moves(board, player)
-    blocked_four_moves = find_existing_blocked_four_moves(board, player)
-    jump_living_four_moves = find_existing_jump_living_four_moves(board, player)
-    jump_blocked_four_moves = find_existing_jump_blocked_four_moves(board, player)
-    living_three_moves = find_existing_living_three_moves(board, player)
-    jump_living_three_moves = find_existing_jump_living_three_moves(board, player)
-    restricted_living_three_moves = find_existing_restricted_living_three_moves(board, player)
-
-    inventory.immediate_win = 1 if winning_moves else 0
-    inventory.open_four = 1 if living_four_moves else 0
-    inventory.rush_four = 1 if (blocked_four_moves or jump_living_four_moves or jump_blocked_four_moves) else 0
-    inventory.open_three = 1 if living_three_moves else 0
-    inventory.jump_open_three = 1 if jump_living_three_moves else 0
-    inventory.restricted_open_three = 1 if restricted_living_three_moves else 0
+    inventory.immediate_win = 1 if find_winning_moves(board, player) else 0
+    for instance in scan_threat_instances(board, player):
+        inventory.increment(instance.category)
 
     total_fours = inventory.open_four + inventory.rush_four
     total_threes = inventory.open_three + inventory.jump_open_three + inventory.restricted_open_three
@@ -750,75 +650,79 @@ def _accumulate_miss_penalty(
     config: RewardConfig,
     *,
     my_strong_attack: bool = False,
+    my_counter_threat: bool = False,
     opp_has_move_to_double_three_before: bool = False,
     opp_has_move_to_double_three_after: bool = False,
     opp_has_move_to_four_three_before: bool = False,
     opp_has_move_to_four_three_after: bool = False,
-) -> float:
-    # Highest priority: opponent had a blockable winning move (e.g. rush four)
-    # and it was not blocked.
-    if (
-        before.immediate_win > 0
-        and after.immediate_win > 0
-        and before.open_four == 0
-    ):
+) -> tuple[float, float]:
+    """返回 (实际漏防惩罚, 因己方强攻而被豁免掉的惩罚额)。
+
+    第二项为正数量级，供调用方判断「这手强攻是否正在靠豁免免责」——是的话要折减它的
+    进攻分，否则随手冲四会净赚。
+    """
+    # Highest priority: the opponent had at least one immediate winning move
+    # before this move and still has one afterwards.  A partial block may turn
+    # an open four into a rush four, but the position is still losing and must
+    # therefore retain the miss penalty.  Any partial-block credit is recorded
+    # independently by _accumulate_block_reward.
+    if before.immediate_win > 0 and after.immediate_win > 0:
         amount = -config.miss_immediate_win_penalty
         details.append(RewardDetail(amount=amount, reason="未阻止对方制胜手"))
-        return amount
+        return amount, 0.0
 
     total_penalty = 0.0
-    # 对方有活四（双赢点）且未堵任何一端时，同样扣漏防惩罚；堵了由 block_reward 加分
-    if (
-        before.immediate_win > 0
-        and after.immediate_win > 0
-        and before.open_four > 0
-        and after.open_four > 0
-    ):
-        amount = -config.miss_immediate_win_penalty
-        details.append(RewardDetail(amount=amount, reason="未阻止对方制胜手"))
-        total_penalty += amount
-
-    # 本手强攻时豁免对一手成活四（活三/跳活三）的漏防惩罚
-    waive_lower_threats = my_strong_attack
+    waived_penalty = 0.0
     # 顺序：未阻止（一手成活四）；冲四/跳四未堵已由上方「未阻止对方制胜手」覆盖并 return；活四由「封堵对方活四」体现，不在此重复扣分
     penalties = (
         ("open_three", config.miss_open_three_penalty, "未阻止对方一手成活四"),
         ("jump_open_three", config.miss_jump_open_three_penalty, "未阻止对方一手成活四"),
     )
     for category, unit_penalty, reason in penalties:
-        if waive_lower_threats and category in (
-            "open_three",
-            "jump_open_three",
-        ):
-            continue
         unresolved = min(before.get(category), after.get(category))
         if unresolved <= 0:
             continue
         amount = -unit_penalty * unresolved
+        # 本手强攻时豁免对一手成活四（活三/跳活三）的漏防惩罚
+        if my_strong_attack:
+            waived_penalty += -amount
+            continue
         details.append(RewardDetail(amount=amount, reason=f"{reason} x{unresolved}"))
         total_penalty += amount
 
-    # 堵截活四不彻底仍留冲四：不再单独扣分，堵了总比不堵强。
+    # 未阻止：对方存在一手成冲四活三/四三或一手成双活三的着法且未消除时扣分，己方强攻可豁免。
+    # 本手成活三/跳活三时只是相对先手（对方可用兼具封堵与反击的一手化解），按系数部分折减。
+    counter_scale = 1.0
+    counter_note = ""
+    if my_counter_threat and not my_strong_attack:
+        counter_scale = _clip(config.counter_threat_waiver_scale, 0.0, 1.0)
+        counter_note = f"（本手反击活三，惩罚 x{counter_scale:.2f}）"
 
-    # 未阻止：对方存在一手成冲四活三/四三或一手成双活三的着法且未消除时扣分，己方强攻可豁免
-    if (
-        opp_has_move_to_four_three_before
-        and opp_has_move_to_four_three_after
-        and not my_strong_attack
-    ):
-        amount = -config.miss_one_move_four_three_penalty
-        details.append(RewardDetail(amount=amount, reason="未阻止对方一手成冲四活三/四三"))
-        total_penalty += amount
-    if (
-        opp_has_move_to_double_three_before
-        and opp_has_move_to_double_three_after
-        and not my_strong_attack
-    ):
-        amount = -config.miss_one_move_double_three_penalty
-        details.append(RewardDetail(amount=amount, reason="未阻止对方一手成双活三"))
+    misses = (
+        (
+            opp_has_move_to_four_three_before and opp_has_move_to_four_three_after,
+            config.miss_one_move_four_three_penalty,
+            "未阻止对方一手成冲四活三/四三",
+        ),
+        (
+            opp_has_move_to_double_three_before and opp_has_move_to_double_three_after,
+            config.miss_one_move_double_three_penalty,
+            "未阻止对方一手成双活三",
+        ),
+    )
+    for unresolved, unit_penalty, reason in misses:
+        if not unresolved:
+            continue
+        if my_strong_attack:
+            waived_penalty += unit_penalty
+            continue
+        amount = -unit_penalty * counter_scale
+        if abs(amount) < 1e-8:
+            continue
+        details.append(RewardDetail(amount=amount, reason=f"{reason}{counter_note}"))
         total_penalty += amount
 
-    return total_penalty
+    return total_penalty, waived_penalty
 
 
 def _is_winning_move(board: Board, move: Move, player: int) -> bool:
@@ -1038,6 +942,9 @@ def compute_process_reward_with_details(
         or my_features.double_four > 0
         or my_features.double_three > 0
     )
+    # 本手形成活三/跳活三：相对先手，可部分折减「一手成双活三/四三」的漏防惩罚。
+    # 仅能成冲四的活三无法成活四，不算反击先手，故不计入。
+    my_counter_threat = my_features.open_three > 0 or my_features.jump_open_three > 0
 
     board.grid[move.row, move.col] = player
     opponent_after = _scan_existing_threat_inventory(board, opponent)
@@ -1045,27 +952,47 @@ def compute_process_reward_with_details(
     opp_can_four_three_after = _opponent_has_move_to_four_three(board, opponent)
     board.grid[move.row, move.col] = 0
 
+    attack_detail_start = len(details)
     attack_reward = _accumulate_shape_reward(details, board, move, my_features, config.attack_scale, config)
+    attack_detail_end = len(details)
     block_reward = _accumulate_block_reward(details, opponent_before, opponent_after, config)
     # A direct win ends the game immediately, so opponent threats no longer matter.
     miss_penalty = 0.0
+    waived_miss_penalty = 0.0
     if not is_winning_move:
-        miss_penalty = _accumulate_miss_penalty(
+        miss_penalty, waived_miss_penalty = _accumulate_miss_penalty(
             details,
             opponent_before,
             opponent_after,
             config,
             my_strong_attack=my_strong_attack,
+            my_counter_threat=my_counter_threat,
             opp_has_move_to_double_three_before=opp_can_double_three_before,
             opp_has_move_to_double_three_after=opp_can_double_three_after,
             opp_has_move_to_four_three_before=opp_can_four_three_before,
             opp_has_move_to_four_three_after=opp_can_four_three_after,
         )
+    # 冲四靠豁免免掉了漏防惩罚时，折减它的进攻分：豁免本身在棋理上成立（绝对先手），
+    # 但「远处随手冲四 + 全额豁免 + 全额进攻分」净收益为正，会成为刷分燃料。
+    # 只折减主棋形恰为冲四的情况；活四/双四/四三/双活三近乎制胜，全额保留。
+    if (
+        waived_miss_penalty > 0.0
+        and attack_reward > 0.0
+        and _primary_category(my_features) == "rush_four"
+    ):
+        waiver_scale = _clip(config.rush_four_waiver_attack_scale, 0.0, 1.0)
+        for detail in details[attack_detail_start:attack_detail_end]:
+            detail.amount *= waiver_scale
+            detail.reason = f"{detail.reason}（强攻豁免漏防，进攻分 x{waiver_scale:.2f}）"
+        attack_reward *= waiver_scale
+
     missed_own_win_penalty = _accumulate_missed_own_win_penalty(details, board, move, player, config, opponent_before)
 
     # 错失直接获胜时，进攻奖励不该叠加——能赢不赢就不该因为"顺便形成活四"而得正分。
+    # 只删进攻项自己的明细行：封堵奖励仍计入总分，按金额正负筛会把它的明细一并删掉，
+    # 让明细合计对不上总分。
     if missed_own_win_penalty != 0.0 and attack_reward > 0.0:
-        details[:] = [d for d in details if d.amount <= 0 or "错失" in d.reason]
+        del details[attack_detail_start:attack_detail_end]
         attack_reward = 0.0
 
     opening_position_reward = 0.0
@@ -1080,9 +1007,14 @@ def compute_process_reward_with_details(
             config,
         )
         if opening_position_scale > 0.0:
+            opening_detail_start = len(details)
             opening_position_reward = (
                 _accumulate_opening_position_reward(details, board, move, config) * opening_position_scale
             )
+            # 缩放要同步写回明细，否则明细行是原值、总分是缩放值，两边对不上账。
+            if opening_position_scale != 1.0:
+                for detail in details[opening_detail_start:]:
+                    detail.amount *= opening_position_scale
         # 漏防时仍对走边/走角单独扣分，使「漏防+走边」同时显示漏防与边线惩罚
         if (miss_penalty != 0.0 or missed_own_win_penalty != 0.0):
             opening_position_reward += _accumulate_opening_edge_corner_penalty_only(
