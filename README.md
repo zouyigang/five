@@ -147,7 +147,7 @@ HeuristicPlayer 会自动对弈 50000 局，每步根据棋形评分选择落子
 **第 2 步：行为克隆预训练**
 
 ```bash
-five-pretrain --dataset data/heuristic_50k.pt --epochs 30 --lr 1e-3 --output-dir pretrain_output
+five-pretrain --dataset data/heuristic_50k.pt --epochs 6 --lr 1e-3 --output-dir pretrain_output
 ```
 
 用交叉熵损失模仿启发式专家的落子选择，同时用 MSE 拟合胜负结果。训练结束后在 `pretrain_output/` 生成 `best_bc.pt`（验证最优）和 `final_bc.pt`（最终轮次）。
@@ -156,9 +156,9 @@ five-pretrain --dataset data/heuristic_50k.pt --epochs 30 --lr 1e-3 --output-dir
 |------|--------|------|
 | `--dataset` | *必填* | 第 1 步生成的 `.pt` 文件 |
 | `--board-size` | 9 | 棋盘大小 |
-| `--channels` | 256 | 网络通道数（须与 PPO 配置一致） |
-| `--blocks` | 16 | 残差块数量（须与 PPO 配置一致） |
-| `--epochs` | 30 | 预训练轮数 |
+| `--channels` | 64 | 网络通道数（须与 PPO 配置一致） |
+| `--blocks` | 6 | 残差块数量（须与 PPO 配置一致） |
+| `--epochs` | 6 | 预训练轮数 |
 | `--batch-size` | 1024 | 批大小 |
 | `--lr` | 1e-3 | 初始学习率 |
 | `--value-coef` | 0.5 | 价值损失权重 |
@@ -340,8 +340,10 @@ five/
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `channels` | 256 | 卷积通道数 |
-| `blocks` | 16 | 残差块数量 |
+| `channels` | 64 | 卷积通道数 |
+| `blocks` | 6 | 残差块数量 |
+
+> 9×9 只有 81 个格点，先前的 `256×16`（约 1900 万参数）远超需要，且自博弈是逐步前向，网络越大每步越慢。`64×6` 约 46 万参数，容量对该棋盘充裕。**改动这两个值会使既有 checkpoint 无法加载**——`five-train --checkpoint` 会检测到结构不符，按 checkpoint 的结构重建网络并打印警告；要真正训练小网络，需按新尺寸重跑 `five-pretrain`。
 
 ### TrainingConfig — PPO 训练参数
 
@@ -350,6 +352,7 @@ five/
 | `board_size` | 9 | 棋盘大小 |
 | `win_length` | 5 | 连珠数 |
 | `self_play_games_per_epoch` | 384 | 每轮自博弈局数 |
+| `self_play_batch_games` | 64 | 并行推进的对局数，同一时刻各局的局面凑成一次前向（1 = 串行） |
 | `epochs` | 600 | 总训练轮数 |
 | `batch_size` | 768 | PPO 更新批大小 |
 | `updates_per_epoch` | 6 | 每轮 PPO 更新次数 |
@@ -364,7 +367,7 @@ five/
 | `entropy_coef` | 0.03 | 熵正则系数 |
 | `temperature_init` | 1.3 | 初始采样温度 |
 | `temperature_min` | 0.35 | 最低采样温度 |
-| `historical_opponent_prob` | 0.4 | 历史对手概率 |
+| `historical_opponent_prob` | 0.4 | 历史对手在**非启发式对局**中所占比例（其余留给与当前策略的自博弈） |
 | `opponent_pool_size` | 80 | 对手池大小 |
 | `heuristic_opponent_max_prob` | 0.70 | 启发式对手在调度峰值时的单局采样概率 |
 | `heuristic_start_fraction` | 0.0 | 启发式占比开始爬升前跳过的轮次比例（0 表示从第 1 轮就有） |
@@ -395,12 +398,14 @@ five/
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `dataset` | `data/heuristic_50k.pt` | 输入数据集 |
-| `channels` | 256 | 卷积通道数 |
-| `blocks` | 16 | 残差块数量 |
-| `epochs` | 30 | 训练轮数 |
+| `channels` | 64 | 卷积通道数（须与 `ModelConfig` 一致） |
+| `blocks` | 6 | 残差块数量（须与 `ModelConfig` 一致） |
+| `epochs` | 6 | 训练轮数 |
 | `batch_size` | 1024 | 批大小 |
 | `lr` | 1e-3 | 初始学习率 |
 | `device` | `cuda` | 训练设备 |
+
+> 行为克隆收敛极快：实测第 1 轮准确率 41.2%、**第 2 轮已达 72.4%**，其后 28 轮仅涨到 76.1%（+3.7 个点），而余弦调度把大半预算花在这段几乎无收益的尾巴上。模仿的上限本就是启发式老师本身，多训无益——默认轮数因此从 30 降到 6，省下的时间应该给 PPO。
 
 ## 命令行参考
 
@@ -431,8 +436,8 @@ five-generate [--games 50000] [--board-size 9] [--win-length 5]
 在终端后台运行预训练，GUI 的「行为克隆预训练」页会按进度文件实时刷新指标与训练曲线。
 
 ```bash
-five-pretrain --dataset PATH [--board-size 9] [--channels 256] [--blocks 16]
-              [--epochs 30] [--batch-size 1024] [--lr 1e-3]
+five-pretrain --dataset PATH [--board-size 9] [--channels 64] [--blocks 6]
+              [--epochs 6] [--batch-size 1024] [--lr 1e-3]
               [--value-coef 0.5] [--device cuda] [--output-dir pretrain_output]
               [--progress-file PATH]
 ```
@@ -454,7 +459,7 @@ five-export-human-games --run-dir runs/<run_id> [--output data/human_marked.pt]
 ## 训练数据与对局记录格式
 
 - **训练指标**：`runs/<run_id>/metrics.csv`
-  - 每行一轮（epoch），包含：`epoch`、`games`、`policy_loss`、`value_loss`、`entropy`、`grad_norm`、`return_mean`、`return_std`、`return_abs_max`、`avg_game_length`、`eval_win_rate_random`、`eval_win_rate_heuristic`、`opening_edge_rate`、`opening_corner_rate`、`opening_center_rate`、`policy_topk_edge_rate`。
+  - 每行一轮（epoch），包含：`epoch`、`games`、`policy_loss`、`value_loss`、`entropy`、`grad_norm`、`return_mean`、`return_std`、`return_abs_max`、`avg_game_length`、`eval_win_rate_random`、`eval_win_rate_heuristic`、`eval_win_rate_anchor`、`opening_edge_rate`、`opening_corner_rate`、`opening_center_rate`、`policy_topk_edge_rate`。
 
 - **对局记录**：`runs/<run_id>/games/<game_id>.json`
   - 顶层字段：棋盘大小、胜负结果、总步数、黑/白方类型（model/heuristic/historical）、模型 checkpoint 等。
@@ -534,7 +539,10 @@ GUI「PPO 微调」页展示原始曲线（浅色）+ 滚动均值（深色）�
 - **Value Loss**：价值头拟合误差；突升并维持高位意味着价值学习与分布失配。
 - **Entropy**：策略随机性；早期高，中后期缓慢下降。
 - **Avg Game Length**：对局形态变化；突然跃迁常意味策略漂移。
-- **Eval Win Rate**：对随机/启发式对手胜率，最直观的强度指标。
+- **Eval Win Rate**：对三类对手的胜率。
+  - `random`：健全性下限，很快饱和到 1.0。
+  - `heuristic`：对 1-ply 启发式的胜率。注意它同时是自博弈中占比最高的对手，单看它容易高估。
+  - `anchor`：对**本次 run 起点策略冻结副本**的胜率。该对手全程不变、从不参与训练，因此这条线衡量的是"比出发时强了多少"，无法靠适应某个固定对手刷高。起步应在 0.5 附近，随训练上升；长期停在 0.5 说明没有真实进步。
 - **Grad Norm**：梯度规模；频繁尖峰是不稳定前兆。
 - **Return Mean/Std/Abs Max**：回报统计，用于观察奖励尺度与异常。
 - **Opening Position Rates**：开局边线/角落/中心比例。

@@ -6,7 +6,7 @@ import torch
 
 from five.ai.encoder import encode_state
 from five.ai.interfaces import AIEngine
-from five.ai.interfaces import AnalysisResult
+from five.ai.interfaces import AnalysisResult, select_moves_batched
 from five.common.config import RewardConfig
 from five.core.game import GomokuGame
 from five.core.move import Move
@@ -62,43 +62,49 @@ def _apply_hybrid_rewards(
     return reward_results
 
 
-def play_self_play_game(
-    game: GomokuGame,
-    black_engine: AIEngine,
-    run_id: str,
-    game_index: int,
-    checkpoint_name: str | None = None,
-    temperature: float = 1.0,
-    reward_config: RewardConfig | None = None,
-    white_engine: AIEngine | None = None,
-    tracked_players: set[int] | None = None,
-    black_player: str | None = None,
-    white_player: str | None = None,
-) -> SelfPlayResult:
-    if white_engine is None:
-        white_engine = black_engine
-    if tracked_players is None:
-        tracked_players = {1, -1}
-    if black_player is None:
-        black_player = "selfplay_model"
-    if white_player is None:
-        white_player = "selfplay_model"
+@dataclass(slots=True)
+class SelfPlaySpec:
+    """一局待进行的对局配置。"""
 
-    state = game.new_game()
-    episode = EpisodeBatch()
-    moves: list[MoveRecord] = []
-    while not state.is_terminal:
+    game_index: int
+    black_engine: AIEngine
+    white_engine: AIEngine | None = None
+    tracked_players: set[int] | None = None
+    black_player: str = "selfplay_model"
+    white_player: str = "selfplay_model"
+
+
+class _GameRunner:
+    """单局的分步状态机：每次只推进一手，便于多局并行凑批。"""
+
+    __slots__ = ("spec", "state", "episode", "moves", "tracked_players", "white_engine")
+
+    def __init__(self, game: GomokuGame, spec: SelfPlaySpec) -> None:
+        self.spec = spec
+        self.state = game.new_game()
+        self.episode = EpisodeBatch()
+        self.moves: list[MoveRecord] = []
+        self.white_engine = spec.white_engine if spec.white_engine is not None else spec.black_engine
+        self.tracked_players = spec.tracked_players if spec.tracked_players is not None else {1, -1}
+
+    @property
+    def finished(self) -> bool:
+        return self.state.is_terminal
+
+    def acting_engine(self) -> AIEngine:
+        return self.spec.black_engine if self.state.current_player == 1 else self.white_engine
+
+    def apply(self, analysis: AnalysisResult) -> None:
+        state = self.state
         acting_player = state.current_player
-        acting_engine = black_engine if acting_player == 1 else white_engine
         encoded = encode_state(state)
-        analysis: AnalysisResult = acting_engine.select_move(state, temperature=temperature)
         move = analysis.action
         action_index = move.to_index(state.board.size)
         log_prob = float(torch.log(torch.tensor(max(analysis.action_probability, 1e-8))).item())
         board_before = state.board.copy()
-        move_record_index = len(moves)
-        if acting_player in tracked_players:
-            episode.add(
+        move_record_index = len(self.moves)
+        if acting_player in self.tracked_players:
+            self.episode.add(
                 Transition(
                     state=encoded,
                     action=action_index,
@@ -113,7 +119,7 @@ def play_self_play_game(
                     move_record_index=move_record_index,
                 )
             )
-        moves.append(
+        self.moves.append(
             MoveRecord(
                 move_index=move_record_index + 1,
                 player=acting_player,
@@ -136,25 +142,97 @@ def play_self_play_game(
         )
         state.apply_move(move)
 
-    reward_results = _apply_hybrid_rewards(episode, state.winner, reward_config)
-    for transition, (total_reward, details) in zip(episode.transitions, reward_results):
-        if transition.move_record_index is None:
-            continue
-        if transition.move_record_index < len(moves):
-            moves[transition.move_record_index].total_reward = total_reward
-            moves[transition.move_record_index].reward_details = details
-    result = "draw" if state.winner == 0 else "five_in_a_row"
-    record = GameRecord(
-        game_id=f"game_{game_index:06d}",
-        run_id=run_id,
-        board_size=state.board.size,
-        win_length=state.board.win_length,
-        winner=state.winner,
-        total_moves=len(moves),
-        black_player=black_player,
-        white_player=white_player,
-        result=result,
-        model_checkpoint=checkpoint_name,
-        moves=moves,
+    def build_result(
+        self,
+        run_id: str,
+        checkpoint_name: str | None,
+        reward_config: RewardConfig | None,
+    ) -> SelfPlayResult:
+        state = self.state
+        reward_results = _apply_hybrid_rewards(self.episode, state.winner, reward_config)
+        for transition, (total_reward, details) in zip(self.episode.transitions, reward_results):
+            if transition.move_record_index is None:
+                continue
+            if transition.move_record_index < len(self.moves):
+                self.moves[transition.move_record_index].total_reward = total_reward
+                self.moves[transition.move_record_index].reward_details = details
+        record = GameRecord(
+            game_id=f"game_{self.spec.game_index:06d}",
+            run_id=run_id,
+            board_size=state.board.size,
+            win_length=state.board.win_length,
+            winner=state.winner,
+            total_moves=len(self.moves),
+            black_player=self.spec.black_player,
+            white_player=self.spec.white_player,
+            result="draw" if state.winner == 0 else "five_in_a_row",
+            model_checkpoint=checkpoint_name,
+            moves=self.moves,
+        )
+        return SelfPlayResult(episode=self.episode, record=record)
+
+
+def play_self_play_games(
+    game: GomokuGame,
+    specs: list[SelfPlaySpec],
+    run_id: str,
+    checkpoint_name: str | None = None,
+    temperature: float = 1.0,
+    reward_config: RewardConfig | None = None,
+) -> list[SelfPlayResult]:
+    """并行推进一批对局，把同一引擎在同一时刻待决策的局面凑成一次前向。
+
+    按引擎对象身份分组：自博弈局的双方、以及对手局中模型的一方，共用同一个
+    ModelAIEngine 实例，因而会合并进同一批；启发式/历史对手各自成组。
+    各局长度不同，走完的局自然退出，不影响其余局继续凑批。
+    """
+    runners = [_GameRunner(game, spec) for spec in specs]
+
+    while True:
+        active = [runner for runner in runners if not runner.finished]
+        if not active:
+            break
+        groups: dict[int, list[_GameRunner]] = {}
+        for runner in active:
+            groups.setdefault(id(runner.acting_engine()), []).append(runner)
+        for group in groups.values():
+            engine = group[0].acting_engine()
+            analyses = select_moves_batched(
+                engine, [runner.state for runner in group], temperature=temperature
+            )
+            for runner, analysis in zip(group, analyses):
+                runner.apply(analysis)
+
+    return [runner.build_result(run_id, checkpoint_name, reward_config) for runner in runners]
+
+
+def play_self_play_game(
+    game: GomokuGame,
+    black_engine: AIEngine,
+    run_id: str,
+    game_index: int,
+    checkpoint_name: str | None = None,
+    temperature: float = 1.0,
+    reward_config: RewardConfig | None = None,
+    white_engine: AIEngine | None = None,
+    tracked_players: set[int] | None = None,
+    black_player: str | None = None,
+    white_player: str | None = None,
+) -> SelfPlayResult:
+    """单局版本；走的是与批量版完全相同的代码路径，避免两套逻辑漂移。"""
+    spec = SelfPlaySpec(
+        game_index=game_index,
+        black_engine=black_engine,
+        white_engine=white_engine,
+        tracked_players=tracked_players,
+        black_player=black_player if black_player is not None else "selfplay_model",
+        white_player=white_player if white_player is not None else "selfplay_model",
     )
-    return SelfPlayResult(episode=episode, record=record)
+    return play_self_play_games(
+        game=game,
+        specs=[spec],
+        run_id=run_id,
+        checkpoint_name=checkpoint_name,
+        temperature=temperature,
+        reward_config=reward_config,
+    )[0]

@@ -10,19 +10,21 @@ def _rolling_window(frame: pd.DataFrame) -> int:
 
 
 def compute_best_epoch(frame: pd.DataFrame) -> int | None:
-    """计算 best epoch，优先原始启发式胜率，适合实际对弈模型选择。
+    """计算 best epoch，适合挑选实际对弈用的模型。
 
-    评分公式：
-        score = heuristic_raw × 5
-              + random_raw × 2
+    评分公式（有锚点胜率时）：
+        score = heuristic_raw × 3
+              + anchor_raw    × 3
+              + random_raw    × 1
               - (value_loss / vl_max) × 0.5
               - k × |entropy - entropy_rolling_mean|
 
-    优先级：
-    1. 原始启发式胜率（权重最高）
-    2. 原始随机胜率（次高）
-    3. 价值损失（越小越好）
-    4. 策略熵（偏离滚动均值越多惩罚越大，防止坍塌或过散）
+    启发式对手占了自博弈对局的大头，单以它选模型等于拿练习册当考卷，会偏向
+    「专门适应这一个 1-ply 机器人」的检查点。锚点（本次 run 起点策略的冻结副本）
+    从不参与训练，与它的胜率无法这样刷高，因此与启发式同权。
+
+    没有 eval_win_rate_anchor 列或该列全为空时（旧 run），回退到原来的
+    heuristic × 5 + random × 2，保证历史 run 的绿线位置不变。
     """
     if frame.empty:
         return None
@@ -49,12 +51,18 @@ def compute_best_epoch(frame: pd.DataFrame) -> int | None:
     k = 0.3
     entropy_penalty = k * (ent - ent_rolling_mean).abs()
 
-    scores = (
-        h_raw * 5.0
-        + r_raw * 2.0
-        - (vl_raw / vl_max) * 0.5
-        - entropy_penalty
-    )
+    anchor = None
+    if "eval_win_rate_anchor" in frame.columns:
+        parsed = pd.to_numeric(frame["eval_win_rate_anchor"], errors="coerce")
+        if parsed.notna().sum() > 0:
+            anchor = parsed.fillna(0.0)
+
+    if anchor is None:
+        strength = h_raw * 5.0 + r_raw * 2.0
+    else:
+        strength = h_raw * 3.0 + anchor * 3.0 + r_raw * 1.0
+
+    scores = strength - (vl_raw / vl_max) * 0.5 - entropy_penalty
     best_idx = int(scores.idxmax())
     return int(epoch.iloc[best_idx])
 

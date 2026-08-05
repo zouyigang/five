@@ -24,7 +24,7 @@ from five.train.dataset import EpisodeBatch
 from five.train.evaluator import evaluate_policy
 from five.train.best_epoch import compute_best_epoch, compute_best_epoch_for_resume
 from five.train.run_manager import RunArtifacts, create_run
-from five.train.self_play import SelfPlayResult, play_self_play_game
+from five.train.self_play import SelfPlayResult, SelfPlaySpec, play_self_play_games
 
 
 LOGGER = get_logger(__name__)
@@ -212,6 +212,10 @@ class PPOTrainer:
         if checkpoint_path:
             self._load_checkpoint(checkpoint_path)
 
+        # 锚点对手：本次 run 起点策略的冻结副本。必须在 checkpoint 加载之后再取，
+        # 否则锚定的是随机初始化的网络而非实际起点。它从不参与训练，也从不更新。
+        self.anchor_engine = self._build_engine_from_state_dict(self._clone_model_state())
+
     def _get_heuristic_prob(self, epoch: int) -> float:
         start_epoch = int(self.config.epochs * self.config.heuristic_start_fraction)
         ramp_epoch = int(self.config.epochs * self.config.heuristic_ramp_fraction)
@@ -243,6 +247,7 @@ class PPOTrainer:
             total_game_length = 0
             position_metrics = _PositionMetricTotals()
             epoch_opponent_counts = {"heuristic": 0, "historical": 0, "self": 0}
+            specs: list[SelfPlaySpec] = []
             for game_offset in range(self.config.self_play_games_per_epoch):
                 game_index = (epoch - 1) * self.config.self_play_games_per_epoch + game_offset + 1
                 black_engine = self.engine
@@ -264,45 +269,42 @@ class PPOTrainer:
                         black_engine = opponent
                         tracked_players = {-1}
                 epoch_opponent_counts[opponent_kind] += 1
-                black_player_name = (
-                    "model"
-                    if black_engine is self.engine
-                    else "heuristic"
-                    if black_engine is heuristic_opponent
-                    else "historical"
+                specs.append(
+                    SelfPlaySpec(
+                        game_index=game_index,
+                        black_engine=black_engine,
+                        white_engine=white_engine,
+                        tracked_players=tracked_players,
+                        black_player="model" if black_engine is self.engine else opponent_kind,
+                        white_player="model" if white_engine is self.engine else opponent_kind,
+                    )
                 )
-                white_player_name = (
-                    "model"
-                    if white_engine is self.engine
-                    else "heuristic"
-                    if white_engine is heuristic_opponent
-                    else "historical"
-                )
-                result = play_self_play_game(
+
+            # 分批并行推进：同一时刻各局待决策的局面凑成一次前向，避免 batch=1 空转 GPU。
+            for chunk_start in range(0, len(specs), self.config.self_play_batch_games):
+                chunk = specs[chunk_start : chunk_start + self.config.self_play_batch_games]
+                for result in play_self_play_games(
                     game=self.game,
-                    black_engine=black_engine,
-                    white_engine=white_engine,
+                    specs=chunk,
                     run_id=self.artifacts.run_id,
-                    game_index=game_index,
                     temperature=temperature,
                     reward_config=self.config.reward,
-                    tracked_players=tracked_players,
-                    black_player=black_player_name,
-                    white_player=white_player_name,
-                )
-                batches.append(result.episode)
-                total_game_length += result.record.total_moves
-                position_metrics.merge(self._collect_position_metric_totals(result))
-                # 只保存少量对局到硬盘，减小存储占用。
-                # 每千局保存两盘：1000k 与 1000k+1。若只存 1000k，在默认 games_per_epoch=384 下
-                # (game_index-1)%384 恒为奇数，启发式/历史对局中模型总在白方；多存一盘可覆盖偶数 offset，回放能看到模型执黑。
-                if game_index >= 1000 and game_index % 1000 in (0, 1):
-                    self.artifacts.game_store.save(result.record)
+                ):
+                    batches.append(result.episode)
+                    total_game_length += result.record.total_moves
+                    position_metrics.merge(self._collect_position_metric_totals(result))
+                    # 只保存少量对局到硬盘，减小存储占用。
+                    # 每千局保存两盘：1000k 与 1000k+1。若只存 1000k，在默认 games_per_epoch=384 下
+                    # (game_index-1)%384 恒为奇数，启发式/历史对局中模型总在白方；多存一盘可覆盖偶数 offset，回放能看到模型执黑。
+                    game_index = int(result.record.game_id.removeprefix("game_"))
+                    if game_index >= 1000 and game_index % 1000 in (0, 1):
+                        self.artifacts.game_store.save(result.record)
             training_batch = self._flatten_batches(batches)
             stats = self._update_policy(training_batch)
             eval_result = evaluate_policy(
                 self.game, self.engine, games=self.config.eval_games,
                 heuristic_temperature=self.config.eval_heuristic_temperature,
+                anchor_engine=self.anchor_engine,
             )
             metric_record = MetricRecord(
                 epoch=epoch,
@@ -317,6 +319,7 @@ class PPOTrainer:
                 avg_game_length=total_game_length / max(len(batches), 1),
                 eval_win_rate_random=eval_result.win_rate_random,
                 eval_win_rate_heuristic=eval_result.win_rate_heuristic,
+                eval_win_rate_anchor=eval_result.win_rate_anchor,
                 opening_edge_rate=position_metrics.opening_edge_rate,
                 opening_corner_rate=position_metrics.opening_corner_rate,
                 opening_center_rate=position_metrics.opening_center_rate,
@@ -385,6 +388,7 @@ class PPOTrainer:
                     "return_mean=%.4f return_std=%.4f return_abs_max=%.4f "
                     "eval_random=%.2f (b=%.2f w=%.2f) "
                     "eval_heuristic=%.2f (b=%.2f w=%.2f) "
+                    "eval_anchor=%.2f (b=%.2f w=%.2f) "
                     "opening_edge=%.3f opening_corner=%.3f opening_center=%.3f topk_edge=%.3f "
                     "opponents(heur/hist/self)=%d/%d/%d"
                 ),
@@ -402,6 +406,9 @@ class PPOTrainer:
                 metric_record.eval_win_rate_heuristic,
                 eval_result.win_rate_heuristic_black,
                 eval_result.win_rate_heuristic_white,
+                metric_record.eval_win_rate_anchor,
+                eval_result.win_rate_anchor_black,
+                eval_result.win_rate_anchor_white,
                 metric_record.opening_edge_rate,
                 metric_record.opening_corner_rate,
                 metric_record.opening_center_rate,
@@ -512,6 +519,7 @@ class PPOTrainer:
         LOGGER.info("Loading checkpoint from %s", checkpoint_path)
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
+        self._adopt_checkpoint_architecture(checkpoint.get("config"))
         self.model.load_state_dict(checkpoint["model_state"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
 
@@ -531,6 +539,43 @@ class PPOTrainer:
         self.model.eval()
 
         self._baseline = self._load_baseline_from_checkpoint(checkpoint_path)
+
+    def _adopt_checkpoint_architecture(self, saved: dict | None) -> None:
+        """按 checkpoint 记录的结构重建网络，再加载权重。
+
+        网络在 __init__ 里就按当前 config 建好了，而权重要到这里才载入。若 checkpoint
+        的通道数/残差块数与当前配置不同（例如默认值调小后去续训旧的 256x16 预训练模型），
+        load_state_dict 会直接抛形状不符的错。权重决定结构，因此以 checkpoint 为准重建，
+        但必须显式告知——否则用户以为在训小模型，实际训的是大模型。
+        """
+        if not isinstance(saved, dict):
+            return
+        saved_model = saved.get("model")
+        if not isinstance(saved_model, dict):
+            return
+        channels = int(saved_model.get("channels", self.config.model.channels))
+        blocks = int(saved_model.get("blocks", self.config.model.blocks))
+        if channels == self.config.model.channels and blocks == self.config.model.blocks:
+            return
+
+        LOGGER.warning(
+            "Checkpoint architecture is %dx%d but the current config asks for %dx%d; "
+            "rebuilding the network as %dx%d to match the weights. "
+            "To actually train the smaller network, re-run pretraining at the new size "
+            "instead of resuming this checkpoint.",
+            channels,
+            blocks,
+            self.config.model.channels,
+            self.config.model.blocks,
+            channels,
+            blocks,
+        )
+        self.config.model = ModelConfig(channels=channels, blocks=blocks)
+        self.model = PolicyValueNet(
+            board_size=self.config.board_size, channels=channels, blocks=blocks
+        ).to(self.device)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate)
+        self.engine = ModelAIEngine(self.model, device=self.config.device)
 
     def _restore_lr_schedule(self, last_epoch: int) -> None:
         """把学习率重新锚定到当前 config.learning_rate，再从 last_epoch 处接上余弦调度。
@@ -731,6 +776,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--learning-rate", type=float, default=None, help="Learning rate (default: 3.5e-4)")
     parser.add_argument(
+        "--channels",
+        type=int,
+        default=None,
+        help=f"Conv channels; must match the checkpoint being resumed (default: {d.model.channels})",
+    )
+    parser.add_argument(
+        "--blocks",
+        type=int,
+        default=None,
+        help=f"Residual blocks; must match the checkpoint being resumed (default: {d.model.blocks})",
+    )
+    parser.add_argument(
+        "--self-play-batch-games",
+        type=int,
+        default=None,
+        help=(
+            "Games advanced in parallel so their positions share one forward pass "
+            f"(1 = sequential). Default: {d.self_play_batch_games}"
+        ),
+    )
+    parser.add_argument(
         "--heuristic-max-prob",
         type=float,
         default=None,
@@ -774,6 +840,12 @@ def main() -> None:
     )
     if args.learning_rate is not None:
         config.learning_rate = args.learning_rate
+    if args.channels is not None:
+        config.model.channels = args.channels
+    if args.blocks is not None:
+        config.model.blocks = args.blocks
+    if args.self_play_batch_games is not None:
+        config.self_play_batch_games = max(1, args.self_play_batch_games)
     if args.heuristic_max_prob is not None:
         config.heuristic_opponent_max_prob = args.heuristic_max_prob
     if args.heuristic_start_fraction is not None:

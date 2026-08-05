@@ -172,9 +172,54 @@ def get_threat_info(board: Board, move: Move, player: int) -> ThreatInfo:
     )
 
 
+def _touches_own_stone(board: Board, row: int, col: int, player: int) -> bool:
+    """落点是否与己方棋子相邻（八邻域）。
+
+    `Board.check_winner` 只统计**连续**棋子，成五必须紧贴着己方棋子，因此没有
+    相邻己子的落点绝不可能立刻成五，可以整点跳过而不改变结果。
+    """
+    grid = board.grid
+    size = board.size
+    for delta_row, delta_col in DIRECTIONS:
+        for sign in (1, -1):
+            near_row, near_col = row + sign * delta_row, col + sign * delta_col
+            if in_bounds(size, near_row, near_col) and grid[near_row, near_col] == player:
+                return True
+    return False
+
+
+def _can_form_shape(board: Board, row: int, col: int, player: int) -> bool:
+    """落点是否可能与己方棋子连成任何棋型。
+
+    `analyze_line` 自落点向外走，只有两种情况会把己子计入：相邻格是己子，或
+    相邻格为空且再一格是己子（全线仅允许这一次跳）；其余情况立即中断。所以
+    两格内没有己子的落点，各方向计数恒为 1，全部棋型必为 0——可以跳过整次
+    `_evaluate_move_features`，这是空点最多的开局阶段的主要节省来源。
+    """
+    grid = board.grid
+    size = board.size
+    for delta_row, delta_col in DIRECTIONS:
+        for sign in (1, -1):
+            delta_r, delta_c = sign * delta_row, sign * delta_col
+            near_row, near_col = row + delta_r, col + delta_c
+            if not in_bounds(size, near_row, near_col):
+                continue
+            cell = grid[near_row, near_col]
+            if cell == player:
+                return True
+            if cell != 0:
+                continue
+            jump_row, jump_col = near_row + delta_r, near_col + delta_c
+            if in_bounds(size, jump_row, jump_col) and grid[jump_row, jump_col] == player:
+                return True
+    return False
+
+
 def find_winning_moves(board: Board, player: int) -> list[Move]:
     winning_moves = []
     for move in board.legal_moves():
+        if not _touches_own_stone(board, move.row, move.col, player):
+            continue
         board.grid[move.row, move.col] = player
         winner = board.check_winner(move)
         board.grid[move.row, move.col] = 0
@@ -510,22 +555,25 @@ def _scan_existing_threat_inventory(board: Board, player: int) -> ThreatInventor
     return inventory
 
 
-def _opponent_has_move_to_double_three(board: Board, opponent: int) -> bool:
-    """检测对方是否存在一手落子即可形成双活三的着法。"""
-    for m in board.legal_moves():
-        features = _evaluate_move_features(board, m, opponent)
+def _opponent_one_move_threats(board: Board, opponent: int) -> tuple[bool, bool]:
+    """一次扫描同时判断对方能否一手成双活三 / 一手成四三，返回 (双活三, 四三)。
+
+    这两项原本各自遍历一遍全部合法点，而它们在同一局面上前后脚被调用，等于把
+    最贵的全盘特征扫描做了两遍。合并后每个落点只评估一次，两项都命中即可提前退出。
+    """
+    has_double_three = False
+    has_four_three = False
+    for move in board.legal_moves():
+        if not _can_form_shape(board, move.row, move.col, opponent):
+            continue
+        features = _evaluate_move_features(board, move, opponent)
         if features.double_three > 0:
-            return True
-    return False
-
-
-def _opponent_has_move_to_four_three(board: Board, opponent: int) -> bool:
-    """检测对方是否存在一手落子即可形成冲四活三/四三的着法。"""
-    for m in board.legal_moves():
-        features = _evaluate_move_features(board, m, opponent)
+            has_double_three = True
         if features.four_three > 0:
-            return True
-    return False
+            has_four_three = True
+        if has_double_three and has_four_three:
+            break
+    return has_double_three, has_four_three
 
 
 def _has_tactical_threat(inventory: ThreatInventory) -> bool:
@@ -930,8 +978,9 @@ def compute_process_reward_with_details(
     details: list[RewardDetail] = []
 
     opponent_before = _scan_existing_threat_inventory(board, opponent)
-    opp_can_double_three_before = _opponent_has_move_to_double_three(board, opponent)
-    opp_can_four_three_before = _opponent_has_move_to_four_three(board, opponent)
+    opp_can_double_three_before, opp_can_four_three_before = _opponent_one_move_threats(
+        board, opponent
+    )
     my_features = _evaluate_move_features(board, move, player)
     is_winning_move = my_features.five > 0
     # 本手形成冲四/活四/四三/双四/双活三时视为强攻，豁免对活三/双活三/四三等漏防惩罚
@@ -948,8 +997,9 @@ def compute_process_reward_with_details(
 
     board.grid[move.row, move.col] = player
     opponent_after = _scan_existing_threat_inventory(board, opponent)
-    opp_can_double_three_after = _opponent_has_move_to_double_three(board, opponent)
-    opp_can_four_three_after = _opponent_has_move_to_four_three(board, opponent)
+    opp_can_double_three_after, opp_can_four_three_after = _opponent_one_move_threats(
+        board, opponent
+    )
     board.grid[move.row, move.col] = 0
 
     attack_detail_start = len(details)

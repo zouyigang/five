@@ -1,8 +1,10 @@
+import pandas as pd
 import pytest
 import torch
 
 from five.ai.model import PolicyValueNet
 from five.common.config import ModelConfig, RewardConfig, TrainingConfig
+from five.train.best_epoch import compute_best_epoch
 from five.train.trainer import (
     RESUME_SKIP_KEYS,
     PPOTrainer,
@@ -239,3 +241,46 @@ def test_historical_prob_of_one_still_leaves_no_self_play_only_when_asked():
 
     assert kinds.count("self") == 0
     assert kinds.count("historical") == 500
+
+
+def _metrics_frame(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows)
+
+
+def test_best_epoch_falls_back_to_legacy_weights_without_anchor_column():
+    """旧 run 的 metrics.csv 没有锚点列，绿线位置必须与从前一致。"""
+    frame = _metrics_frame([
+        {"epoch": 1, "eval_win_rate_heuristic": 0.9, "eval_win_rate_random": 0.5,
+         "value_loss": 0.1, "entropy": 1.2},
+        {"epoch": 2, "eval_win_rate_heuristic": 0.2, "eval_win_rate_random": 1.0,
+         "value_loss": 0.1, "entropy": 1.2},
+    ])
+
+    # 5*0.9 + 2*0.5 = 5.5  >  5*0.2 + 2*1.0 = 3.0
+    assert compute_best_epoch(frame) == 1
+
+
+def test_anchor_win_rate_can_outweigh_the_training_opponent():
+    """专门适应启发式、但相对起点毫无长进的检查点，不应再被选为 best。"""
+    frame = _metrics_frame([
+        # 启发式胜率高，但打不过自己的起点（没有真实进步）
+        {"epoch": 1, "eval_win_rate_heuristic": 0.95, "eval_win_rate_random": 0.9,
+         "eval_win_rate_anchor": 0.30, "value_loss": 0.1, "entropy": 1.2},
+        # 启发式胜率略低，但明显强于起点
+        {"epoch": 2, "eval_win_rate_heuristic": 0.75, "eval_win_rate_random": 0.9,
+         "eval_win_rate_anchor": 0.85, "value_loss": 0.1, "entropy": 1.2},
+    ])
+
+    # 3*0.95 + 3*0.30 + 0.9 = 4.65   vs   3*0.75 + 3*0.85 + 0.9 = 5.70
+    assert compute_best_epoch(frame) == 2
+
+
+def test_anchor_column_present_but_empty_is_treated_as_absent():
+    frame = _metrics_frame([
+        {"epoch": 1, "eval_win_rate_heuristic": 0.9, "eval_win_rate_random": 0.5,
+         "eval_win_rate_anchor": float("nan"), "value_loss": 0.1, "entropy": 1.2},
+        {"epoch": 2, "eval_win_rate_heuristic": 0.2, "eval_win_rate_random": 1.0,
+         "eval_win_rate_anchor": float("nan"), "value_loss": 0.1, "entropy": 1.2},
+    ])
+
+    assert compute_best_epoch(frame) == 1

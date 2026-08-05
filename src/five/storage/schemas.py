@@ -68,6 +68,8 @@ class MetricRecord:
     avg_game_length: float
     eval_win_rate_random: float
     eval_win_rate_heuristic: float
+    # 对本次 run 起点策略（锚点）的胜率：训练中不出现的对手，衡量真实自我提升。
+    eval_win_rate_anchor: float = float("nan")
     opening_edge_rate: float = 0.0
     opening_corner_rate: float = 0.0
     opening_center_rate: float = 0.0

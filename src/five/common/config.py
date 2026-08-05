@@ -86,9 +86,12 @@ class RewardConfig:
 
 @dataclass(slots=True)
 class ModelConfig:
-    # 策略/价值网络：卷积通道数；残差块数量
-    channels: int = 256
-    blocks: int = 16
+    # 策略/价值网络：卷积通道数；残差块数量。
+    # 9x9 只有 81 个格点，256x16（约 1900 万参数，每格 23 万）远超需要，且自博弈是
+    # 逐步前向，网络越大每步越慢、迭代越慢。64x6 约 100 万参数，容量对该棋盘充裕。
+    # 改动这两个值会使既有 checkpoint 因结构不符而无法加载，需要重跑预训练。
+    channels: int = 64
+    blocks: int = 6
 
 
 @dataclass(slots=True)
@@ -101,6 +104,10 @@ class TrainingConfig:
     # 自对弈：每轮对局数；总轮数
     self_play_games_per_epoch: int = 384
     epochs: int = 600
+    # 同时并行推进的对局数。各局在同一时刻待决策的局面会凑成一次网络前向，
+    # 取代 batch=1 的逐局串行（实测每局面成本相差一到两个数量级）。
+    # 调大更快但显存占用更高；设为 1 即退回串行。
+    self_play_batch_games: int = 64
     # PPO 更新：批大小；每轮更新次数；学习率及下限；梯度裁剪
     batch_size: int = 768
     updates_per_epoch: int = 6
@@ -167,9 +174,13 @@ class PretrainConfig:
     """five-pretrain 默认参数：行为克隆预训练。"""
     dataset: str = "data/heuristic_50k.pt"
     board_size: int = 9
-    channels: int = 256
-    blocks: int = 16
-    epochs: int = 30
+    # 必须与 ModelConfig 保持一致：产出的 checkpoint 要能直接被 five-train 加载续训。
+    channels: int = 64
+    blocks: int = 6
+    # 行为克隆收敛极快：实测第 1 轮 41.2%、第 2 轮 72.4%，之后 28 轮只涨到 76.1%
+    # （+3.7 个点），而余弦调度把大半预算花在了这段几乎无收益的尾巴上。模仿的上限
+    # 本就是启发式老师本身，多训无益，省下的时间应该给 PPO。
+    epochs: int = 6
     batch_size: int = 1024
     lr: float = 1e-3
     value_coef: float = 0.5

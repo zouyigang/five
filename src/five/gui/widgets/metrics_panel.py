@@ -277,6 +277,7 @@ class MetricsPanel(ttk.Frame):
             [
                 ("eval_win_rate_random", "random", "tab:blue"),
                 ("eval_win_rate_heuristic", "heuristic", "tab:orange"),
+                ("eval_win_rate_anchor", "anchor (run start)", "tab:green"),
             ],
             "Eval Win Rate",
             ylim=(0.0, 1.0),

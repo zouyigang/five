@@ -5,7 +5,7 @@ and the value head via MSE against game outcomes, producing a checkpoint
 that can be loaded by ``five-train --checkpoint ...`` for PPO fine-tuning.
 
 Usage:
-    five-pretrain --dataset data/heuristic_20k.pt --epochs 15 --lr 1e-3
+    five-pretrain --dataset data/heuristic_50k.pt --epochs 6 --lr 1e-3
 """
 
 from __future__ import annotations
@@ -43,16 +43,17 @@ def _load_dataset(path: str, device: torch.device) -> TensorDataset:
 def pretrain(
     dataset_path: str,
     *,
-    board_size: int = 9,
-    channels: int = 256,
-    blocks: int = 16,
-    epochs: int = 15,
-    batch_size: int = 1024,
-    lr: float = 1e-3,
-    value_coef: float = 0.5,
-    device_str: str = "cuda",
-    output_dir: str = "pretrain_output",
-    seed: int = 42,
+    # 默认值统一取自 PretrainConfig，避免这里与配置文件各存一套而悄悄分岔。
+    board_size: int = DEFAULT_PRETRAIN.board_size,
+    channels: int = DEFAULT_PRETRAIN.channels,
+    blocks: int = DEFAULT_PRETRAIN.blocks,
+    epochs: int = DEFAULT_PRETRAIN.epochs,
+    batch_size: int = DEFAULT_PRETRAIN.batch_size,
+    lr: float = DEFAULT_PRETRAIN.lr,
+    value_coef: float = DEFAULT_PRETRAIN.value_coef,
+    device_str: str = DEFAULT_PRETRAIN.device,
+    output_dir: str = DEFAULT_PRETRAIN.output_dir,
+    seed: int = DEFAULT_PRETRAIN.seed,
     on_epoch_end: Callable[[int, int, float, float, float, float], None] | None = None,
     progress_file: str | None = None,
 ) -> Path:

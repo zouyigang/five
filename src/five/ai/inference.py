@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from five.ai.encoder import encode_state
@@ -42,6 +43,47 @@ class ModelAIEngine(AIEngine):
             value_estimate=float(value.item()),
             candidates=candidates,
         )
+
+    @torch.no_grad()
+    def select_moves(
+        self,
+        states: list[GameState],
+        temperature: float = 0.0,
+    ) -> list[AnalysisResult]:
+        """一次前向处理整批局面；语义与逐个调用 select_move 完全一致。
+
+        自博弈的瓶颈是 batch=1 前向：同一时刻有几百局在等同一个网络，凑成一批
+        可以把每局面成本降低一到两个数量级。
+        """
+        if not states:
+            return []
+
+        encoded = torch.stack([encode_state(state) for state in states]).to(self.device)
+        masks = torch.from_numpy(np.stack([state.legal_mask() for state in states])).to(self.device)
+        logits, values = self.model(encoded)
+        masked_logits = logits.masked_fill(masks == 0, -1e9)
+        probabilities = torch.softmax(masked_logits / max(temperature, 1e-3), dim=-1)
+        if temperature <= 1e-6:
+            action_indices = torch.argmax(masked_logits, dim=-1)
+        else:
+            action_indices = torch.multinomial(probabilities, num_samples=1).squeeze(-1)
+
+        chosen = probabilities.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+        action_list = action_indices.tolist()
+        probability_list = chosen.tolist()
+        value_list = values.flatten().tolist()
+
+        results: list[AnalysisResult] = []
+        for index, state in enumerate(states):
+            results.append(
+                AnalysisResult(
+                    action=Move.from_index(int(action_list[index]), state.board.size),
+                    action_probability=float(probability_list[index]),
+                    value_estimate=float(value_list[index]),
+                    candidates=self._top_candidates(probabilities[index], state, top_k=5),
+                )
+            )
+        return results
 
     @torch.no_grad()
     def analyze(self, state: GameState, top_k: int = 5) -> list[CandidateMove]:

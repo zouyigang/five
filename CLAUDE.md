@@ -69,7 +69,16 @@ Either way `_log_reward_config_source` logs the effective source plus a field-le
 
 ### Self-play and training loop
 
-`play_self_play_game` drives one game through the `AIEngine` Protocol (`select_move` / `analyze` / `load_checkpoint`). `ModelAIEngine`, `HeuristicPlayer`, and `RandomPlayer` are freely interchangeable behind it — that is how the trainer mixes opponents without special-casing.
+`play_self_play_games` drives a *batch* of games through the `AIEngine` Protocol (`select_move` / `analyze` / `load_checkpoint`). `ModelAIEngine`, `HeuristicPlayer`, and `RandomPlayer` are freely interchangeable behind it — that is how the trainer mixes opponents without special-casing.
+
+**Self-play advances games in lockstep, not one at a time.** `_GameRunner` is a per-game state machine advanced one move at a time; the driver groups the currently-active runners by `id(engine)` and issues one batched forward per group via `select_moves_batched`. Engines that define `select_moves` (only `ModelAIEngine`) batch; everything else falls back to a per-state loop. Games have different lengths, so runners drop out of the active set as they finish. `play_self_play_game` (singular) is a thin wrapper over the batch path so the two cannot drift apart — `tests/test_self_play.py` pins that a deterministic engine produces byte-identical records either way.
+
+**Self-play time is dominated by the reward function, not the network** — ~91% of wall time is inside `_apply_hybrid_rewards` (measured with `perf_counter`; `cProfile` inflates this further because the hot path is millions of tiny calls). Growing the network or the batch size therefore buys very little. Two things keep it in check, and both are load-bearing:
+
+- `_opponent_one_move_threats` answers "can the opponent make a double-three?" and "…a four-three?" in **one** scan. They used to be two functions each walking every legal point, on a board where they are always called back to back.
+- `_can_form_shape` prunes candidate points before the expensive `_evaluate_move_features`. It is exact, not heuristic: `analyze_line` only counts an own stone when it is adjacent, or one gap away (the single jump a line is allowed), so a point with no own stone within two cells provably scores zero everywhere. Together these cut `_evaluate_move_features` calls by 54% and self-play wall time by 27%.
+
+When changing any of this, prove behavior is unchanged rather than relying on the unit tests — snapshot `compute_hybrid_reward_with_details` (totals **and** every `RewardDetail`) plus `_scan_existing_threat_inventory` over a few hundred random positions, then diff before/after. The tests pin intent; only a snapshot catches a pruning rule that is subtly too aggressive.
 
 **`tracked_players` is what makes curriculum learning work.** When the model plays a heuristic or historical opponent, only the model's own side is appended to the `EpisodeBatch`; the opponent's moves still appear in the `GameRecord` but generate no training transitions. An episode therefore frequently contains only one color's moves.
 
@@ -80,7 +89,7 @@ Rewards are assigned after the game ends (`_apply_hybrid_rewards`), using each t
 ### Two different "best" checkpoints
 
 `best_epoch.py` defines two distinct scoring formulas, shared between the trainer and the GUI metrics panel so the saved checkpoint always matches the green line on the chart:
-- `compute_best_epoch` → **`best.pt`** — for *playing*. Dominated by raw heuristic win rate.
+- `compute_best_epoch` → **`best.pt`** — for *playing*. `heuristic × 3 + anchor × 3 + random × 1`, minus value-loss and entropy-deviation terms. The **anchor** is a frozen copy of the policy as it stood when the run started (`PPOTrainer.anchor_engine`, snapshotted *after* any checkpoint load) and never trains. It carries the same weight as the heuristic on purpose: the heuristic is also ~70% of the self-play opponent mix, so selecting on it alone rewards checkpoints that merely specialize against one 1-ply bot. A run whose `metrics.csv` has no `eval_win_rate_anchor` column (anything recorded before this metric existed) falls back to the old `heuristic × 5 + random × 2`, so historical green lines do not move.
 - `compute_best_epoch_for_resume` → **`best_for_resume.pt`** — for *continuing training*. Scores training health instead: entropy inside `[1.0, 1.4]`, low value loss, non-declining win-rate trend, no anomalies.
 
 Pick `best_for_resume.pt` for `five-train --checkpoint`, `best.pt` for human-vs-AI play.
