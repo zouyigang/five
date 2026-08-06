@@ -47,6 +47,17 @@ def compute_episode_rewards(task: RewardTask) -> list[tuple[float, list[RewardDe
     """
     results: list[tuple[float, list[RewardDetail]]] = []
     total = len(task.steps)
+
+    # 输家的最后一手：与获胜手拿 +final_win_reward 对称，这里扣 -final_loss_penalty。
+    # 必须在 episode 层判定——单步的 (board, move, player, winner) 看不出「这是输家的
+    # 最后一次决策」，因为输家永远不是走出终局那一手的人。
+    loser_last_index: int | None = None
+    if task.winner != 0 and task.config.final_loss_penalty > 0.0:
+        for index in reversed(range(total)):
+            if task.steps[index][3] != task.winner:
+                loser_last_index = index
+                break
+
     for index, (grid, row, col, player) in enumerate(task.steps):
         missed_own_win = False
         if grid is not None:
@@ -61,6 +72,11 @@ def compute_episode_rewards(task: RewardTask) -> list[tuple[float, list[RewardDe
         else:
             reward = 0.0
             details = []
+
+        if index == loser_last_index:
+            penalty = -task.config.final_loss_penalty
+            reward += penalty
+            details.append(RewardDetail(amount=penalty, reason="终局失败惩罚"))
 
         if not missed_own_win:
             tail_bonus = compute_outcome_tail_bonus(player, task.winner, total - index - 1, task.config)

@@ -11,6 +11,11 @@ class RewardConfig:
     attack_scale: float = 0.03
     block_scale: float = 0.035
     # 单步过程奖励与总奖励的裁剪上下界（绝对值）
+    # 单步过程奖励上限。不要为了「压制塑形」而调小：漏防惩罚本身就有 2.2~2.8，
+    # 上限一旦逼近它，大量局面会一起顶到裁剪值而变得不可区分。
+    # 实测 2400 次求值中被裁剪的比例：上限 2.5 -> 35.6%，1.5 -> 51.6%，1.0 -> 55.0%，
+    # 不同取值数从 140 掉到 84，「反击」与「无意义的一手」会被压成同一个分数。
+    # 要削弱塑形应当按比例缩小各项分值，而不是收紧这个上限。
     max_process_reward: float = 2.5
     max_total_reward: float = 5.0
     # ---------- 开局 ---------- 前 N 步内生效的位置奖惩
@@ -24,10 +29,19 @@ class RewardConfig:
     edge_shape_decay: float = 0.4
     corner_shape_decay: float = 0.25
 
-    # 终局：获胜/平局时的额外奖励
+    # 终局：获胜/平局/失败时的额外奖励。
+    # final_loss_penalty 加在**输家最后一手**上，与 final_win_reward 对称。
+    # 缺了它的时候终局是单向的：赢 +3.0，输 0.0，一整局的败绩(-1.11，仅来自尾部回传)
+    # 比漏挡一次冲四(-2.8)还便宜，于是「赢不了就尽快输」成为最优策略——实测对局长度
+    # 从 30.5 手塌到 9.5 手（成五理论最短即 9 手）、封堵动作占比从 23.4% 归零。
     final_win_reward: float = 3.0
+    final_loss_penalty: float = 3.0
     draw_reward: float = 0.0
-    # 终局结果回传：距终局 N 步内的衰减 bonus；只对最后 outcome_horizon 步生效，避免前期好棋被输棋回传压成负分
+    # 终局结果回传：距终局 N 步内的衰减 bonus；只对最后 outcome_horizon 步生效，避免前期好棋被输棋回传压成负分。
+    # 不要因为「GAE 已经会回传终局奖励、这里属于重复计数」而调小它——40 轮三组对照实测，
+    # 减到 0.15 会让 anchor 胜率从 0.416 崩到 0.034（比不加输棋惩罚的基线还差十倍）。
+    # 它的作用不是冗余回传，而是把集中在一手上的 ±final_* 尖峰摊平；削弱它会让价值函数
+    # 去拟合孤立尖峰，方差急剧变大。
     outcome_tail_bonus: float = 0.3
     outcome_decay: float = 0.85
     outcome_horizon: int = 6
