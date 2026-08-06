@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing
+import os
 import random
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -215,6 +218,30 @@ class PPOTrainer:
         # 锚点对手：本次 run 起点策略的冻结副本。必须在 checkpoint 加载之后再取，
         # 否则锚定的是随机初始化的网络而非实际起点。它从不参与训练，也从不更新。
         self.anchor_engine = self._build_engine_from_state_dict(self._clone_model_state())
+        self._reward_executor: ProcessPoolExecutor | None = None
+
+    def _get_reward_executor(self) -> ProcessPoolExecutor | None:
+        """惰性创建奖励计算进程池，整个 run 复用一个（Windows 下进程启动很慢）。"""
+        workers = self.config.reward_workers
+        if workers == 1:
+            return None
+        if workers <= 0:
+            workers = max(1, (os.cpu_count() or 2) - 2)
+        if workers == 1:
+            return None
+        if self._reward_executor is None:
+            # 显式用 spawn：Windows 只有 spawn，显式指定可让 Linux 行为一致，
+            # 也避免 fork 出来的子进程继承 CUDA 上下文。
+            self._reward_executor = ProcessPoolExecutor(
+                max_workers=workers, mp_context=multiprocessing.get_context("spawn")
+            )
+            LOGGER.info("Reward computation pool started with %d workers", workers)
+        return self._reward_executor
+
+    def _shutdown_reward_executor(self) -> None:
+        if self._reward_executor is not None:
+            self._reward_executor.shutdown(wait=True)
+            self._reward_executor = None
 
     def _get_heuristic_prob(self, epoch: int) -> float:
         start_epoch = int(self.config.epochs * self.config.heuristic_start_fraction)
@@ -234,6 +261,13 @@ class PPOTrainer:
         return self.config.temperature_init - (self.config.temperature_init - self.config.temperature_min) * progress
 
     def train(self) -> None:
+        try:
+            self._train()
+        finally:
+            # 无论正常结束、异常还是 Ctrl-C，都要收掉进程池，避免留下孤儿进程。
+            self._shutdown_reward_executor()
+
+    def _train(self) -> None:
         start_epoch = getattr(self, "_start_epoch", 1)
         for epoch in range(start_epoch, self.config.epochs + 1):
             self._epoch_counter = epoch
@@ -289,6 +323,7 @@ class PPOTrainer:
                     run_id=self.artifacts.run_id,
                     temperature=temperature,
                     reward_config=self.config.reward,
+                    reward_executor=self._get_reward_executor(),
                 ):
                     batches.append(result.episode)
                     total_game_length += result.record.total_moves
@@ -300,7 +335,8 @@ class PPOTrainer:
                     if game_index >= 1000 and game_index % 1000 in (0, 1):
                         self.artifacts.game_store.save(result.record)
             training_batch = self._flatten_batches(batches)
-            stats = self._update_policy(training_batch)
+            # 与本轮自博弈的采样温度保持一致，否则重要性采样比失真。
+            stats = self._update_policy(training_batch, temperature=temperature)
             eval_result = evaluate_policy(
                 self.game, self.engine, games=self.config.eval_games,
                 heuristic_temperature=self.config.eval_heuristic_temperature,
@@ -649,9 +685,17 @@ class PPOTrainer:
         LOGGER.info("Baseline recorded: epoch=%s heuristic=%.2f", baseline_epoch, heuristic)
         return baseline
 
-    def _update_policy(self, batch: TrainingBatch):
+    def _update_policy(self, batch: TrainingBatch, temperature: float = 1.0):
+        """PPO 更新。
+
+        `temperature` 必须与自博弈采样时用的温度相同：`old_log_prob` 记录的是采样
+        分布 softmax(logits / T) 下的概率，若这里按 T=1 求新策略概率，重要性采样比
+        exp(new - old) 会系统性偏离 1（实测 T=0.35 时均值 0.95、14.6% 的样本一进来
+        就落在裁剪区间外），PPO 的裁剪语义随之失效。
+        """
         if batch.states.size(0) == 0:
             return _LossStats(policy_loss=0.0, value_loss=0.0, entropy=0.0, grad_norm=0.0)
+        inverse_temperature = 1.0 / max(temperature, 1e-3)
 
         self.model.train()
         advantages = batch.advantages
@@ -672,7 +716,7 @@ class PPOTrainer:
                 batch_old_values = batch.old_values[batch_indices]
 
                 logits, values = self.model(states)
-                masked_logits = logits.masked_fill(legal_masks == 0, -1e9)
+                masked_logits = logits.masked_fill(legal_masks == 0, -1e9) * inverse_temperature
                 log_probs = torch.log_softmax(masked_logits, dim=-1)
                 probs = torch.softmax(masked_logits, dim=-1)
                 chosen_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
@@ -788,6 +832,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"Residual blocks; must match the checkpoint being resumed (default: {d.model.blocks})",
     )
     parser.add_argument(
+        "--reward-workers",
+        type=int,
+        default=None,
+        help=(
+            "Worker processes for reward computation, which is ~90%% of self-play time "
+            f"(0 = auto, 1 = inline). Default: {d.reward_workers}"
+        ),
+    )
+    parser.add_argument(
         "--self-play-batch-games",
         type=int,
         default=None,
@@ -846,6 +899,8 @@ def main() -> None:
         config.model.blocks = args.blocks
     if args.self_play_batch_games is not None:
         config.self_play_batch_games = max(1, args.self_play_batch_games)
+    if args.reward_workers is not None:
+        config.reward_workers = max(0, args.reward_workers)
     if args.heuristic_max_prob is not None:
         config.heuristic_opponent_max_prob = args.heuristic_max_prob
     if args.heuristic_start_fraction is not None:

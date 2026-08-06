@@ -36,15 +36,40 @@ class EpisodeBatch:
         gamma: float,
         gae_lambda: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        rewards = [transition.reward for transition in self.transitions]
-        values = [transition.value for transition in self.transitions] + [0.0]
-        dones = [transition.done for transition in self.transitions]
-        advantages = np.zeros(len(self.transitions), dtype=np.float32)
-        last_advantage = 0.0
-        for step in reversed(range(len(self.transitions))):
-            next_non_terminal = 1.0 - float(dones[step])
-            delta = rewards[step] + gamma * values[step + 1] * next_non_terminal - values[step]
-            last_advantage = delta + gamma * gae_lambda * next_non_terminal * last_advantage
-            advantages[step] = last_advantage
-        returns = advantages + np.asarray(values[:-1], dtype=np.float32)
+        """按**走子方**分别计算 GAE，再散回原位置。
+
+        价值头输出的是「当前走子方」的期望胜负（`encode_state` 的己方/对方平面相对
+        走子方），所以只有同一方的两个价值才在同一坐标系里。
+
+        对手局只记录模型一方，相邻 transition 天然是同一方隔两手的连续决策，整条
+        序列同框；自博弈局双方都记录，相邻 transition 每步换边，若直接用
+        `V(s_{t+1}) - V(s_t)`，减掉的是对手视角的价值，优势函数整个失真。
+
+        拆分后每条子序列都退化成与对手局相同的结构，因此对手局的结果与拆分前逐位
+        一致，只有自博弈局被纠正。子序列末尾即该方在本局的最后一次决策，按终止处理。
+        """
+        count = len(self.transitions)
+        advantages = np.zeros(count, dtype=np.float32)
+        values = np.array([transition.value for transition in self.transitions], dtype=np.float32)
+
+        indices_by_player: dict[int, list[int]] = {}
+        for index, transition in enumerate(self.transitions):
+            indices_by_player.setdefault(transition.player, []).append(index)
+
+        for indices in indices_by_player.values():
+            last_advantage = 0.0
+            for position in reversed(range(len(indices))):
+                index = indices[position]
+                is_final = position == len(indices) - 1
+                next_non_terminal = 0.0 if is_final else 1.0
+                next_value = 0.0 if is_final else values[indices[position + 1]]
+                delta = (
+                    self.transitions[index].reward
+                    + gamma * next_value * next_non_terminal
+                    - values[index]
+                )
+                last_advantage = delta + gamma * gae_lambda * next_non_terminal * last_advantage
+                advantages[index] = last_advantage
+
+        returns = advantages + values
         return torch.from_numpy(returns), torch.from_numpy(advantages)

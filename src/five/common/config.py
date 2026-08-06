@@ -108,6 +108,10 @@ class TrainingConfig:
     # 取代 batch=1 的逐局串行（实测每局面成本相差一到两个数量级）。
     # 调大更快但显存占用更高；设为 1 即退回串行。
     self_play_batch_games: int = 64
+    # 奖励计算的工作进程数。奖励是纯 CPU 单线程且占自博弈约 90% 的耗时，
+    # 不并行时整个训练只能吃满约 1 个核。0 = 自动（留 2 个核给主进程与推理），
+    # 1 = 在主进程内联计算（不启进程池）。
+    reward_workers: int = 0
     # PPO 更新：批大小；每轮更新次数；学习率及下限；梯度裁剪
     batch_size: int = 768
     updates_per_epoch: int = 6

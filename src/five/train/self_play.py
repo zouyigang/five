@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Executor
 from dataclasses import dataclass
 
 import torch
@@ -8,6 +9,7 @@ from five.ai.encoder import encode_state
 from five.ai.interfaces import AIEngine
 from five.ai.interfaces import AnalysisResult, select_moves_batched
 from five.common.config import RewardConfig
+from five.core.board import Board
 from five.core.game import GomokuGame
 from five.core.move import Move
 from five.storage.schemas import GameRecord, MoveRecord, MoveSummary, RewardDetail
@@ -21,6 +23,90 @@ class SelfPlayResult:
     record: GameRecord
 
 
+@dataclass(slots=True)
+class RewardTask:
+    """一局奖励计算所需的最小载荷：可 pickle，且不含张量。
+
+    奖励计算占自博弈约 90% 的耗时且是纯 CPU 单线程，把它派到进程池是唯一能吃满
+    多核的办法。这里只带 9x9 int8 网格和落子信息，不带 4x9x9 状态张量与合法掩码，
+    序列化开销可以忽略。
+    """
+
+    winner: int
+    board_size: int
+    win_length: int
+    config: RewardConfig
+    # 每个 transition 一项：(落子前网格, row, col, player)；缺少局面时网格为 None
+    steps: list[tuple[object, int, int, int]]
+
+
+def compute_episode_rewards(task: RewardTask) -> list[tuple[float, list[RewardDetail]]]:
+    """纯函数：算出一局中每个 transition 的 (总奖励, 明细)。
+
+    进程池 worker 与主进程共用这一份实现，两条路径不会漂移。
+    """
+    results: list[tuple[float, list[RewardDetail]]] = []
+    total = len(task.steps)
+    for index, (grid, row, col, player) in enumerate(task.steps):
+        missed_own_win = False
+        if grid is not None:
+            board = Board(size=task.board_size, win_length=task.win_length)
+            board.grid = grid
+            result = compute_hybrid_reward_with_details(
+                board, Move(row, col), player, task.winner, task.config
+            )
+            reward = result.total_reward
+            details = [RewardDetail(amount=d.amount, reason=d.reason) for d in result.details]
+            missed_own_win = result.missed_own_win
+        else:
+            reward = 0.0
+            details = []
+
+        if not missed_own_win:
+            tail_bonus = compute_outcome_tail_bonus(player, task.winner, total - index - 1, task.config)
+            if tail_bonus is not None:
+                reward += tail_bonus.amount
+                details.append(RewardDetail(amount=tail_bonus.amount, reason=tail_bonus.reason))
+
+        results.append((reward, details))
+    return results
+
+
+def build_reward_task(
+    episode: EpisodeBatch,
+    winner: int,
+    board_size: int,
+    win_length: int,
+    config: RewardConfig,
+) -> RewardTask:
+    steps: list[tuple[object, int, int, int]] = []
+    for transition in episode.transitions:
+        if transition.board_before is not None and transition.move is not None:
+            steps.append(
+                (transition.board_before.grid, transition.move.row, transition.move.col, transition.player)
+            )
+        else:
+            steps.append((None, 0, 0, transition.player))
+    return RewardTask(
+        winner=winner,
+        board_size=board_size,
+        win_length=win_length,
+        config=config,
+        steps=steps,
+    )
+
+
+def _write_back_rewards(
+    episode: EpisodeBatch,
+    reward_results: list[tuple[float, list[RewardDetail]]],
+) -> None:
+    for transition, (reward, _details) in zip(episode.transitions, reward_results):
+        transition.reward = reward
+        transition.done = False
+    if episode.transitions:
+        episode.transitions[-1].done = True
+
+
 def _apply_hybrid_rewards(
     episode: EpisodeBatch,
     winner: int,
@@ -28,37 +114,16 @@ def _apply_hybrid_rewards(
 ) -> list[tuple[float, list[RewardDetail]]]:
     if config is None:
         config = RewardConfig()
-
-    reward_results = []
-    total_transitions = len(episode.transitions)
-    for index, transition in enumerate(episode.transitions):
-        missed_own_win = False
-        if transition.board_before is not None and transition.move is not None:
-            result = compute_hybrid_reward_with_details(
-                transition.board_before,
-                transition.move,
-                transition.player,
-                winner,
-                config,
-            )
-            details = [RewardDetail(amount=d.amount, reason=d.reason) for d in result.details]
-            transition.reward = result.total_reward
-            missed_own_win = result.missed_own_win
-        else:
-            transition.reward = 0.0
-            details = []
-
-        if not missed_own_win:
-            plies_from_end = total_transitions - index - 1
-            tail_bonus = compute_outcome_tail_bonus(transition.player, winner, plies_from_end, config)
-            if tail_bonus is not None:
-                transition.reward += tail_bonus.amount
-                details.append(RewardDetail(amount=tail_bonus.amount, reason=tail_bonus.reason))
-
-        reward_results.append((transition.reward, details))
-        transition.done = False
-    if episode.transitions:
-        episode.transitions[-1].done = True
+    board_size = 0
+    win_length = 0
+    for transition in episode.transitions:
+        if transition.board_before is not None:
+            board_size = transition.board_before.size
+            win_length = transition.board_before.win_length
+            break
+    task = build_reward_task(episode, winner, board_size, win_length, config)
+    reward_results = compute_episode_rewards(task)
+    _write_back_rewards(episode, reward_results)
     return reward_results
 
 
@@ -142,14 +207,27 @@ class _GameRunner:
         )
         state.apply_move(move)
 
+    def reward_task(self, reward_config: RewardConfig) -> RewardTask:
+        return build_reward_task(
+            self.episode,
+            self.state.winner,
+            self.state.board.size,
+            self.state.board.win_length,
+            reward_config,
+        )
+
     def build_result(
         self,
         run_id: str,
         checkpoint_name: str | None,
         reward_config: RewardConfig | None,
+        reward_results: list[tuple[float, list[RewardDetail]]] | None = None,
     ) -> SelfPlayResult:
         state = self.state
-        reward_results = _apply_hybrid_rewards(self.episode, state.winner, reward_config)
+        if reward_results is None:
+            reward_results = _apply_hybrid_rewards(self.episode, state.winner, reward_config)
+        else:
+            _write_back_rewards(self.episode, reward_results)
         for transition, (total_reward, details) in zip(self.episode.transitions, reward_results):
             if transition.move_record_index is None:
                 continue
@@ -179,12 +257,17 @@ def play_self_play_games(
     checkpoint_name: str | None = None,
     temperature: float = 1.0,
     reward_config: RewardConfig | None = None,
+    reward_executor: "Executor | None" = None,
 ) -> list[SelfPlayResult]:
     """并行推进一批对局，把同一引擎在同一时刻待决策的局面凑成一次前向。
 
     按引擎对象身份分组：自博弈局的双方、以及对手局中模型的一方，共用同一个
     ModelAIEngine 实例，因而会合并进同一批；启发式/历史对手各自成组。
     各局长度不同，走完的局自然退出，不影响其余局继续凑批。
+
+    `reward_executor` 非空时，各局的奖励计算派发到进程池。奖励是纯 CPU 单线程且
+    占自博弈约 90% 的耗时，是唯一能把利用率从 1 核铺到多核的环节；对局之间完全
+    独立，因此可以整局为粒度并行。
     """
     runners = [_GameRunner(game, spec) for spec in specs]
 
@@ -203,7 +286,18 @@ def play_self_play_games(
             for runner, analysis in zip(group, analyses):
                 runner.apply(analysis)
 
-    return [runner.build_result(run_id, checkpoint_name, reward_config) for runner in runners]
+    if reward_executor is None:
+        return [runner.build_result(run_id, checkpoint_name, reward_config) for runner in runners]
+
+    config = reward_config if reward_config is not None else RewardConfig()
+    tasks = [runner.reward_task(config) for runner in runners]
+    # 每局约 100ms，chunksize=1 的调度开销可忽略，换来的是各 worker 负载均衡
+    # （对局长度差异很大，成块分发会让拿到长局的 worker 拖住整批）。
+    all_rewards = list(reward_executor.map(compute_episode_rewards, tasks, chunksize=1))
+    return [
+        runner.build_result(run_id, checkpoint_name, config, reward_results=rewards)
+        for runner, rewards in zip(runners, all_rewards)
+    ]
 
 
 def play_self_play_game(
