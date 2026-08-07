@@ -323,7 +323,8 @@ five/
 | `edge_shape_decay` | 0.4 | 边线棋形价值折减 |
 | `corner_shape_decay` | 0.25 | 角落棋形价值折减 |
 | `final_win_reward` | 8.0 | 获胜奖励（须压过全程过程分收入上限，否则「不赢、只收塑形分」在经济上占优） |
-| `time_step_penalty` | 0.05 | 每步固定时间成本（防止拖长对局刷过程分：拖满和棋净扣 ~4 分，速胜几乎无感） |
+| `final_loss_penalty` | 8.0 | 失败惩罚，须与 `final_win_reward` 对称；关成 0 时输棋净收益仍为正，防守失去经济价值 |
+| `time_step_penalty` | 0.20 | 每步固定时间成本，按实测步均过程奖励 +0.25 定价。它是常数偏移，不改变同一局面下各落点的相对优劣，只抵消「继续拖」本身的收益 |
 | `outcome_tail_bonus` | 0.3 | 终局结果回传基础值 |
 | `outcome_decay` | 0.85 | 终局回传衰减系数 |
 | `outcome_horizon` | 6 | 终局回传覆盖步数 |
@@ -524,7 +525,9 @@ five-export-human-games --run-dir runs/<run_id> [--output data/human_marked.pt]
 
 ### 终局与结果回传
 
-- 致胜一手给 `final_win_reward`（8.0）。
+- 致胜一手给 `final_win_reward`（8.0），输家最后一手扣 `final_loss_penalty`（8.0），两者对称。
+- 每一步扣 `time_step_penalty`（0.20），抵消过程塑形的正净值，使「拖长对局」本身不再有利可图。
+  三者配套后的账（单方约 9 手）：速胜 ~ +8.5、拖满和棋 ~ +2.0、速败 ~ -7.6。
 - 最后 `outcome_horizon`（6）步内按距终局的距离做衰减的胜负 bonus。
 - 错失直接获胜的步跳过 outcome tail bonus，避免正奖励冲抵惩罚。
 

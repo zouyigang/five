@@ -404,10 +404,13 @@ def test_opening_center_move_is_rewarded():
     )
     board = Board(size=9, win_length=5)
 
-    result = compute_process_reward_with_details(board, Move(4, 4), 1, config)
+    center = compute_process_reward_with_details(board, Move(4, 4), 1, config)
+    corner = compute_process_reward_with_details(board, Move(0, 0), 1, config)
 
-    assert result.total_reward > 0
-    assert any("开局中心落子奖励" == detail.reason for detail in result.details)
+    # 每步时间成本是所有落点共享的常数偏移，单手总分的正负已无意义；
+    # 真正要保证的是同一局面下中心优于角落。
+    assert center.total_reward > corner.total_reward
+    assert any("开局中心落子奖励" == detail.reason for detail in center.details)
 
 
 def test_opening_edge_move_is_penalized():
@@ -1023,12 +1026,16 @@ def test_draw_has_no_loss_penalty():
     assert not any("终局失败惩罚" in d.reason for _, details in results for d in details)
 
 
-def test_loss_penalty_is_off_by_default_to_avoid_draw_seeking():
-    """默认关闭：开到 3.0 时 draw_reward=0 使「求和」远优于「求胜」，48 局 42 和。
+def test_terminal_rewards_are_symmetric():
+    """输赢必须对称定价。
 
-    「赢不了就尽快输」的解药是 TrainingConfig.kl_coef 的锚定，不是这一项。
+    关成 0.0 时（赢 +8.0 / 输 0.0），按实测步均 +0.20 算输一局仍净赚 +1.8，防守
+    失去全部经济价值——实测执白 24 战全负、挡住率 59%->33%。而单独开大它又会让
+    「求和」优于「求胜」，那是 time_step_penalty 不足导致的，两者必须配套。
     """
-    assert RewardConfig().final_loss_penalty == 0.0
+    config = RewardConfig()
+    assert config.final_loss_penalty == config.final_win_reward
+    assert config.draw_reward == 0.0
 
 
 def test_every_move_pays_the_time_cost():
@@ -1066,12 +1073,16 @@ def test_quick_win_outearns_a_board_filling_draw():
     （40 手自身决策）的总账必须是速胜显著更高。
     """
     config = RewardConfig()
-    mean_shaping_per_step = 0.15
-    net_step = mean_shaping_per_step - config.time_step_penalty
+    # ppo_econ run 464 局实测：步均过程奖励（不含时间成本）= +0.2496
+    measured_shaping_per_step = 0.2496
+    net_step = measured_shaping_per_step - config.time_step_penalty
 
-    quick_win_total = net_step * 10 + config.final_win_reward
-    full_draw_total = net_step * 40 + config.draw_reward
+    quick_win = net_step * 10 + config.final_win_reward
+    full_draw = net_step * 40 + config.draw_reward
+    quick_loss = net_step * 10 - config.final_loss_penalty
 
-    assert quick_win_total > full_draw_total + 2.0, (
-        f"速胜 {quick_win_total:.2f} 应显著高于拖满和棋 {full_draw_total:.2f}"
-    )
+    assert quick_win > full_draw + 2.0, f"速胜 {quick_win:.2f} 应显著高于拖满和棋 {full_draw:.2f}"
+    assert quick_loss < full_draw - 2.0, f"速败 {quick_loss:.2f} 应显著低于和棋 {full_draw:.2f}"
+    assert quick_loss < 0, f"输棋必须是净亏 (实得 {quick_loss:.2f})，否则防守没有经济价值"
+    # 净步值不应转负，否则「尽快输」会重新变成一种止损手段
+    assert net_step > 0, f"净步值 {net_step:.4f} 转负会激励尽快结束对局"
