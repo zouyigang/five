@@ -712,7 +712,9 @@ def test_missed_own_win_suppresses_attack_reward():
     result = compute_process_reward_with_details(board, Move(3, 4), 1)
 
     assert any("错失直接获胜落点" in d.reason for d in result.details)
-    assert not any(d.amount > 0 for d in result.details)
+    # 裁剪补差行是会计项不是奖励项：时间成本使原本恰好 -2.5 的总分变 -2.55，
+    # 触发 +0.05 的裁剪回填。真正要断言的是没有任何塑形项拿到正分。
+    assert not any(d.amount > 0 and "裁剪" not in d.reason for d in result.details)
     assert result.total_reward < 0
     assert result.missed_own_win is True
 
@@ -1027,3 +1029,49 @@ def test_loss_penalty_is_off_by_default_to_avoid_draw_seeking():
     「赢不了就尽快输」的解药是 TrainingConfig.kl_coef 的锚定，不是这一项。
     """
     assert RewardConfig().final_loss_penalty == 0.0
+
+
+def test_every_move_pays_the_time_cost():
+    board = _place(Board(size=9, win_length=5), [(4, 4, 1)])
+
+    result = compute_process_reward_with_details(board, Move(4, 5), -1)
+
+    time_lines = [d for d in result.details if d.reason == "每步时间成本"]
+    assert len(time_lines) == 1
+    assert time_lines[0].amount == pytest.approx(-RewardConfig().time_step_penalty)
+
+
+def test_win_reward_survives_the_total_clip():
+    """max_total_reward 必须容得下 final_win_reward，否则赢棋奖励被静默裁掉。"""
+    config = RewardConfig()
+    assert config.max_total_reward >= config.final_win_reward + config.max_process_reward
+
+    board = _place(
+        Board(size=9, win_length=5),
+        [(4, 0, 1), (4, 1, 1), (4, 2, 1), (4, 3, 1), (2, 2, -1), (2, 3, -1), (2, 4, -1), (2, 5, -1)],
+    )
+    from five.train.reward import compute_hybrid_reward_with_details
+
+    result = compute_hybrid_reward_with_details(board, Move(4, 4), 1, winner=1)
+
+    win_lines = [d for d in result.details if d.reason == "终局获胜奖励"]
+    assert win_lines and win_lines[0].amount == pytest.approx(config.final_win_reward)
+    assert not any("总奖励裁剪" in d.reason for d in result.details)
+
+
+def test_quick_win_outearns_a_board_filling_draw():
+    """回归 600 轮实测的刷分模式：拖满和棋的总收益曾高于速胜，赢棋反而终结收入流。
+
+    用实测口径估算：过程塑形步均约 +0.15。速胜（10 手自身决策）与拖满和棋
+    （40 手自身决策）的总账必须是速胜显著更高。
+    """
+    config = RewardConfig()
+    mean_shaping_per_step = 0.15
+    net_step = mean_shaping_per_step - config.time_step_penalty
+
+    quick_win_total = net_step * 10 + config.final_win_reward
+    full_draw_total = net_step * 40 + config.draw_reward
+
+    assert quick_win_total > full_draw_total + 2.0, (
+        f"速胜 {quick_win_total:.2f} 应显著高于拖满和棋 {full_draw_total:.2f}"
+    )

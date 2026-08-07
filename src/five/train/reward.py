@@ -1071,7 +1071,17 @@ def compute_process_reward_with_details(
                 details, board, move, config
             )
 
-    total_reward = attack_reward + block_reward + miss_penalty + missed_own_win_penalty + opening_position_reward
+    # 每步固定时间成本：所有过程塑形项都是正的，没有它，「拖长对局多收塑形分」在
+    # 经济上优于「赢棋终结收入流」——600 轮实测策略确实学会了双方配合拖满和棋。
+    time_penalty = 0.0
+    if config.time_step_penalty > 0.0:
+        time_penalty = -config.time_step_penalty
+        details.append(RewardDetail(amount=time_penalty, reason="每步时间成本"))
+
+    total_reward = (
+        attack_reward + block_reward + miss_penalty + missed_own_win_penalty
+        + opening_position_reward + time_penalty
+    )
     clipped_reward = _clip(total_reward, -config.max_process_reward, config.max_process_reward)
     if abs(clipped_reward - total_reward) > 1e-8:
         details.append(RewardDetail(amount=clipped_reward - total_reward, reason="过程奖励裁剪"))

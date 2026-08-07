@@ -17,7 +17,16 @@ class RewardConfig:
     # 不同取值数从 140 掉到 84，「反击」与「无意义的一手」会被压成同一个分数。
     # 要削弱塑形应当按比例缩小各项分值，而不是收紧这个上限。
     max_process_reward: float = 2.5
-    max_total_reward: float = 5.0
+    # 必须容得下 final_win_reward + 过程分，否则赢棋奖励会被静默裁掉
+    # （5.0 的旧值配 8.0 的赢棋奖励时，制胜一手实得只有 5.0）。
+    max_total_reward: float = 12.0
+    # ---------- 每步时间成本 ----------
+    # 600 轮实测的刷分模式：过程塑形步均约 +0.15 全为正，「拖满 81 手的和棋」总收益
+    # (+6.0) 高于「20 手速胜」(+4.5)，赢棋反而终结收入流，于是策略学会双方配合把
+    # 棋盘填满谁也不赢（对局长度 56->73 手、return 单调涨、胜率归零、best 停在第 2 轮）。
+    # 每步固定扣一小笔：拖满和棋净扣 ~4 分，速胜几乎无感；配合调大 final_win_reward
+    # 保证「赢」在任何对局长度下都是总收益最高的结局。
+    time_step_penalty: float = 0.05
     # ---------- 开局 ---------- 前 N 步内生效的位置奖惩
     opening_position_horizon: int = 36
     opening_center_bonus: float = 0.12
@@ -35,7 +44,9 @@ class RewardConfig:
     # 按胜/和/负分解重测：开到 3.0 时 48 局里 42 局下成和棋——draw_reward=0 而输棋 -3.0，
     # 求和远优于求胜，策略就去求和了；关掉后同样做到 0 负，还能赢 21~24 局。
     # 「赢不了就尽快输」那个退化行为的真正解药是 kl_coef 的锚定，不是这一项。
-    final_win_reward: float = 3.0
+    # 8.0 而非 3.0：终局信号必须压过全程过程分收入的上限（步均 ~+0.15 x 40 手自身
+    # 决策 ≈ 6.0），否则「不赢、只收塑形分」在经济上占优。与 time_step_penalty 配套。
+    final_win_reward: float = 8.0
     final_loss_penalty: float = 0.0
     draw_reward: float = 0.0
     # 终局结果回传：距终局 N 步内的衰减 bonus；只对最后 outcome_horizon 步生效，避免前期好棋被输棋回传压成负分。

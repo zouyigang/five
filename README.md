@@ -314,7 +314,7 @@ five/
 | `attack_scale` | 0.03 | 进攻奖励全局缩放系数 |
 | `block_scale` | 0.035 | 防守奖励全局缩放系数 |
 | `max_process_reward` | 2.5 | 单步过程奖励裁剪上限 |
-| `max_total_reward` | 5.0 | 总奖励裁剪上限 |
+| `max_total_reward` | 12.0 | 总奖励裁剪上限（须容得下 `final_win_reward` + 过程分，否则赢棋奖励被静默裁掉） |
 | `opening_position_horizon` | 36 | 开局位置塑形生效步数 |
 | `opening_center_bonus` | 0.12 | 开局中心落子奖励 |
 | `opening_edge_penalty` | 0.8 | 开局边线落子惩罚 |
@@ -322,7 +322,8 @@ five/
 | `opening_center_radius_ratio` | 0.28 | 中心区域半径比例 |
 | `edge_shape_decay` | 0.4 | 边线棋形价值折减 |
 | `corner_shape_decay` | 0.25 | 角落棋形价值折减 |
-| `final_win_reward` | 3.0 | 获胜奖励 |
+| `final_win_reward` | 8.0 | 获胜奖励（须压过全程过程分收入上限，否则「不赢、只收塑形分」在经济上占优） |
+| `time_step_penalty` | 0.05 | 每步固定时间成本（防止拖长对局刷过程分：拖满和棋净扣 ~4 分，速胜几乎无感） |
 | `outcome_tail_bonus` | 0.3 | 终局结果回传基础值 |
 | `outcome_decay` | 0.85 | 终局回传衰减系数 |
 | `outcome_horizon` | 6 | 终局回传覆盖步数 |
@@ -523,7 +524,7 @@ five-export-human-games --run-dir runs/<run_id> [--output data/human_marked.pt]
 
 ### 终局与结果回传
 
-- 致胜一手给 `final_win_reward`（3.0）。
+- 致胜一手给 `final_win_reward`（8.0）。
 - 最后 `outcome_horizon`（6）步内按距终局的距离做衰减的胜负 bonus。
 - 错失直接获胜的步跳过 outcome tail bonus，避免正奖励冲抵惩罚。
 
