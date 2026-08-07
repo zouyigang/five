@@ -70,6 +70,9 @@ class MetricRecord:
     eval_win_rate_heuristic: float
     # 对本次 run 起点策略（锚点）的胜率：训练中不出现的对手，衡量真实自我提升。
     eval_win_rate_anchor: float = float("nan")
+    # KL(π_anchor ‖ π)：策略偏离锚点的程度。kl_coef>0 时这是首要监控量——
+    # 它涨说明锚定在松开，正是「策略散开、丢掉战术尖峰」那个失效模式的先兆。
+    kl_to_anchor: float = 0.0
     opening_edge_rate: float = 0.0
     opening_corner_rate: float = 0.0
     opening_center_rate: float = 0.0

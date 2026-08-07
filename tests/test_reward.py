@@ -988,17 +988,19 @@ def _loss_penalty_task(winner: int, players: list[int]):
     """构造一个只关心终局项的最小 RewardTask（网格为 None -> 过程奖励为 0）。"""
     from five.train.self_play import RewardTask
 
+    config = RewardConfig()
+    config.final_loss_penalty = 3.0  # 默认已关闭，这里显式打开以测试机制本身
     return RewardTask(
         winner=winner,
         board_size=9,
         win_length=5,
-        config=RewardConfig(),
+        config=config,
         steps=[(None, 0, 0, p) for p in players],
     )
 
 
 def test_loser_last_move_gets_the_terminal_loss_penalty():
-    """终局必须对称：赢家拿 +final_win_reward，输家最后一手扣 -final_loss_penalty。"""
+    """启用时必须落在输家的最后一手上（默认关闭，见 test_loss_penalty_is_off_by_default）。"""
     from five.train.self_play import compute_episode_rewards
 
     # 黑(1)获胜；白(-1)的最后一手是 index 3
@@ -1008,7 +1010,7 @@ def test_loser_last_move_gets_the_terminal_loss_penalty():
     assert "终局失败惩罚" in reasons[3]
     assert sum("终局失败惩罚" in r for r in reasons) == 1, "只应扣在输家最后一手上"
     penalty = [d.amount for d in results[3][1] if d.reason == "终局失败惩罚"][0]
-    assert penalty == pytest.approx(-RewardConfig().final_loss_penalty)
+    assert penalty == pytest.approx(-3.0)
 
 
 def test_draw_has_no_loss_penalty():
@@ -1019,15 +1021,9 @@ def test_draw_has_no_loss_penalty():
     assert not any("终局失败惩罚" in d.reason for _, details in results for d in details)
 
 
-def test_losing_a_game_now_costs_more_than_one_missed_block():
-    """回归：修复前输掉整局(-1.11)比漏挡一次冲四(-2.8)还便宜，导致模型主动速输。"""
-    config = RewardConfig()
-    tail_total = sum(
-        config.outcome_tail_bonus * config.outcome_decay ** (k - 1)
-        for k in range(1, config.outcome_horizon)
-    )
-    loss_total = config.final_loss_penalty + tail_total
+def test_loss_penalty_is_off_by_default_to_avoid_draw_seeking():
+    """默认关闭：开到 3.0 时 draw_reward=0 使「求和」远优于「求胜」，48 局 42 和。
 
-    assert loss_total > config.miss_immediate_win_penalty
-    # 过程奖励也不该盖过终局：单步上限乘常见的一方步数
-    assert config.max_process_reward <= config.final_loss_penalty
+    「赢不了就尽快输」的解药是 TrainingConfig.kl_coef 的锚定，不是这一项。
+    """
+    assert RewardConfig().final_loss_penalty == 0.0

@@ -149,6 +149,9 @@ class TrainingBatch:
     raw_return_mean: float = 0.0
     raw_return_std: float = 0.0
     raw_return_abs_max: float = 0.0
+    # 锚点策略在这批局面上的对数概率（T=1，已按合法点掩码）。锚点是冻结的，
+    # 整批只需前向一次，不必在每个 minibatch 里重算。
+    anchor_log_probs: torch.Tensor | None = None
 
 
 @dataclass(slots=True)
@@ -243,6 +246,23 @@ class PPOTrainer:
             self._reward_executor.shutdown(wait=True)
             self._reward_executor = None
 
+    def _discard_broken_reward_executor(self) -> None:
+        """池一旦破损就整个丢弃，下一轮重建。
+
+        BrokenProcessPool 之后该 executor 永久不可用，继续复用会让每一轮都退回内联
+        计算（慢 6 倍）。self_play 侧已经保证这一批仍会算出正确结果，这里只负责让
+        后续轮次能恢复并行。
+        """
+        if self._reward_executor is None:
+            return
+        if getattr(self._reward_executor, "_broken", False):
+            LOGGER.warning("Reward worker pool is broken; discarding it so the next epoch rebuilds.")
+            try:
+                self._reward_executor.shutdown(wait=False)
+            except Exception:
+                pass
+            self._reward_executor = None
+
     def _get_heuristic_prob(self, epoch: int) -> float:
         start_epoch = int(self.config.epochs * self.config.heuristic_start_fraction)
         ramp_epoch = int(self.config.epochs * self.config.heuristic_ramp_fraction)
@@ -334,6 +354,7 @@ class PPOTrainer:
                     game_index = int(result.record.game_id.removeprefix("game_"))
                     if game_index >= 1000 and game_index % 1000 in (0, 1):
                         self.artifacts.game_store.save(result.record)
+            self._discard_broken_reward_executor()
             training_batch = self._flatten_batches(batches)
             # 与本轮自博弈的采样温度保持一致，否则重要性采样比失真。
             stats = self._update_policy(training_batch, temperature=temperature)
@@ -356,6 +377,7 @@ class PPOTrainer:
                 eval_win_rate_random=eval_result.win_rate_random,
                 eval_win_rate_heuristic=eval_result.win_rate_heuristic,
                 eval_win_rate_anchor=eval_result.win_rate_anchor,
+                kl_to_anchor=stats.kl_to_anchor,
                 opening_edge_rate=position_metrics.opening_edge_rate,
                 opening_corner_rate=position_metrics.opening_corner_rate,
                 opening_center_rate=position_metrics.opening_center_rate,
@@ -424,7 +446,7 @@ class PPOTrainer:
                     "return_mean=%.4f return_std=%.4f return_abs_max=%.4f "
                     "eval_random=%.2f (b=%.2f w=%.2f) "
                     "eval_heuristic=%.2f (b=%.2f w=%.2f) "
-                    "eval_anchor=%.2f (b=%.2f w=%.2f) "
+                    "eval_anchor=%.2f (b=%.2f w=%.2f) kl=%.4f "
                     "opening_edge=%.3f opening_corner=%.3f opening_center=%.3f topk_edge=%.3f "
                     "opponents(heur/hist/self)=%d/%d/%d"
                 ),
@@ -445,6 +467,7 @@ class PPOTrainer:
                 metric_record.eval_win_rate_anchor,
                 eval_result.win_rate_anchor_black,
                 eval_result.win_rate_anchor_white,
+                metric_record.kl_to_anchor,
                 metric_record.opening_edge_rate,
                 metric_record.opening_corner_rate,
                 metric_record.opening_center_rate,
@@ -538,18 +561,36 @@ class PPOTrainer:
         ret_std = raw_returns.std() + 1e-8
         normalized_returns = (raw_returns - raw_returns.mean()) / ret_std
         normalized_returns = normalized_returns.clamp(-1.0, 1.0)
+        state_tensor = torch.stack(states).to(self.device)
+        mask_tensor = torch.stack(legal_masks).to(self.device)
         return TrainingBatch(
-            states=torch.stack(states).to(self.device),
+            states=state_tensor,
             actions=torch.tensor(actions, dtype=torch.long, device=self.device),
             old_log_probs=torch.tensor(old_log_probs, dtype=torch.float32, device=self.device),
             returns=normalized_returns,
             advantages=torch.tensor(advantages, dtype=torch.float32, device=self.device),
-            legal_masks=torch.stack(legal_masks).to(self.device),
+            legal_masks=mask_tensor,
             old_values=torch.tensor(old_values, dtype=torch.float32, device=self.device),
             raw_return_mean=raw_mean,
             raw_return_std=raw_std,
             raw_return_abs_max=raw_abs_max,
+            anchor_log_probs=self._anchor_log_probs(state_tensor, mask_tensor),
         )
+
+    @torch.no_grad()
+    def _anchor_log_probs(self, states: torch.Tensor, legal_masks: torch.Tensor):
+        """锚点策略在这批局面上的 log π（T=1）。kl_coef=0 时不计算。"""
+        if self.config.kl_coef <= 0.0 or states.numel() == 0:
+            return None
+        anchor_model = self.anchor_engine.model
+        anchor_model.eval()
+        outputs = []
+        # 整批一次前向可能超显存，按块走；锚点冻结，无需梯度。
+        for start in range(0, states.size(0), 4096):
+            logits, _ = anchor_model(states[start : start + 4096])
+            masked = logits.masked_fill(legal_masks[start : start + 4096] == 0, -1e9)
+            outputs.append(torch.log_softmax(masked, dim=-1))
+        return torch.cat(outputs, dim=0)
 
     def _load_checkpoint(self, checkpoint_path: str) -> None:
         LOGGER.info("Loading checkpoint from %s", checkpoint_path)
@@ -716,7 +757,8 @@ class PPOTrainer:
                 batch_old_values = batch.old_values[batch_indices]
 
                 logits, values = self.model(states)
-                masked_logits = logits.masked_fill(legal_masks == 0, -1e9) * inverse_temperature
+                masked_raw = logits.masked_fill(legal_masks == 0, -1e9)
+                masked_logits = masked_raw * inverse_temperature
                 log_probs = torch.log_softmax(masked_logits, dim=-1)
                 probs = torch.softmax(masked_logits, dim=-1)
                 chosen_log_probs = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
@@ -739,10 +781,24 @@ class PPOTrainer:
                 value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
 
                 entropy = -(probs * log_probs).sum(dim=-1).mean()
+
+                # 对锚点的正向 KL：KL(π_anchor ‖ π)。选正向而非反向是因为它是
+                # 「覆盖型」的——锚点把 0.8 的概率压在唯一挡点、而新策略只给 0.02 时
+                # 会被重罚，正好对应我们要防止的失效模式（策略散开、丢掉尖峰）。
+                # 用 T=1 的原始分布，约束的是实际对弈的策略而非探索用的采样分布。
+                kl_penalty = torch.zeros((), device=self.device)
+                if self.config.kl_coef > 0.0 and batch.anchor_log_probs is not None:
+                    anchor_log_probs = batch.anchor_log_probs[batch_indices]
+                    raw_log_probs = torch.log_softmax(masked_raw, dim=-1)
+                    kl_penalty = (
+                        anchor_log_probs.exp() * (anchor_log_probs - raw_log_probs)
+                    ).sum(dim=-1).mean()
+
                 loss = (
                     policy_loss
                     + self.config.value_coef * value_loss
                     - self.config.entropy_coef * entropy
+                    + self.config.kl_coef * kl_penalty
                 )
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -752,12 +808,14 @@ class PPOTrainer:
                 loss_stats.value_loss += float(value_loss.item())
                 loss_stats.entropy += float(entropy.item())
                 loss_stats.grad_norm += float(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
+                loss_stats.kl_to_anchor += float(kl_penalty.item())
                 num_batches += 1
         if num_batches > 0:
             loss_stats.policy_loss /= num_batches
             loss_stats.value_loss /= num_batches
             loss_stats.entropy /= num_batches
             loss_stats.grad_norm /= num_batches
+            loss_stats.kl_to_anchor /= num_batches
         self.model.eval()
         return loss_stats
 
@@ -798,6 +856,7 @@ class _LossStats:
     value_loss: float
     entropy: float
     grad_norm: float
+    kl_to_anchor: float = 0.0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Executor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 
 import torch
@@ -14,7 +15,11 @@ from five.core.game import GomokuGame
 from five.core.move import Move
 from five.storage.schemas import GameRecord, MoveRecord, MoveSummary, RewardDetail
 from five.train.dataset import EpisodeBatch, Transition
+from five.common.logging import get_logger
 from five.train.reward import compute_hybrid_reward_with_details, compute_outcome_tail_bonus
+
+
+LOGGER = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -307,9 +312,17 @@ def play_self_play_games(
 
     config = reward_config if reward_config is not None else RewardConfig()
     tasks = [runner.reward_task(config) for runner in runners]
-    # 每局约 100ms，chunksize=1 的调度开销可忽略，换来的是各 worker 负载均衡
-    # （对局长度差异很大，成块分发会让拿到长局的 worker 拖住整批）。
-    all_rewards = list(reward_executor.map(compute_episode_rewards, tasks, chunksize=1))
+    try:
+        # 每局约 100ms，chunksize=1 的调度开销可忽略，换来的是各 worker 负载均衡
+        # （对局长度差异很大，成块分发会让拿到长局的 worker 拖住整批）。
+        all_rewards = list(reward_executor.map(compute_episode_rewards, tasks, chunksize=1))
+    except BrokenProcessPool:
+        # 进程池挂掉不该让几小时的训练一起完蛋：退回内联计算（慢，但结果完全一致）。
+        # 调用方负责丢弃这个池，后续轮次会重新建。
+        LOGGER.warning(
+            "Reward worker pool broke; falling back to inline reward computation for this batch."
+        )
+        return [runner.build_result(run_id, checkpoint_name, config) for runner in runners]
     return [
         runner.build_result(run_id, checkpoint_name, config, reward_results=rewards)
         for runner, rewards in zip(runners, all_rewards)
