@@ -23,10 +23,16 @@ class VersusAIPage(ttk.Frame):
         self.controller = controller
         self.selected_run = tk.StringVar()
         self.selected_model = tk.StringVar()
-        self.selected_difficulty = tk.StringVar(value="标准")
-        # 搜索强度。单局对弈用不上跨对局批量，每次模拟就是一次 batch=1 前向，
-        # 实测本机 64/200/800 模拟约 125/400/1600 ms 一手，对人机对弈都可接受。
+        # 搜索强度就是难度：模拟数越少算得越浅，像一个水平较低但正常的对手。
+        # 这比调采样温度好——温度只会让 AI 偶尔走一手蠢棋，行为不自然。
+        # 单局对弈用不上跨对局批量，每次模拟即一次 batch=1 前向，
+        # 实测本机 64/200/800 模拟约 113/390/1983 ms 一手。
         self.selected_search = tk.StringVar(value="标准(200)")
+        # 开局随机手数。推理本该全程取最优手，但双方都确定性时同一开局必然走出同一盘棋
+        # （实测 24 局只有 1 局不同），人只要摸到一条赢棋路线就能无限重放。
+        # 把随机性集中在开局：前 N 手按分布采样，之后全程最优，中后盘棋力一点不损失。
+        self.selected_opening = tk.StringVar(value="2 手")
+        self._ai_move_count = 0
         self._search_engines: dict[int, MCTSEngine] = {}
         self._model: PolicyValueNet | None = None
         self.human_first = tk.BooleanVar(value=True)
@@ -48,12 +54,12 @@ class VersusAIPage(ttk.Frame):
         top.pack(fill=tk.X, padx=8, pady=8)
         self.run_box = ttk.Combobox(top, textvariable=self.selected_run, state="readonly", width=35)
         self.model_box = ttk.Combobox(top, textvariable=self.selected_model, state="readonly", width=35)
-        self.difficulty_box = ttk.Combobox(
+        self.opening_box = ttk.Combobox(
             top,
-            textvariable=self.selected_difficulty,
+            textvariable=self.selected_opening,
             state="readonly",
-            width=10,
-            values=["固定", "稳健", "标准", "探索"],
+            width=8,
+            values=["关闭", "1 手", "2 手", "4 手"],
         )
         self.search_box = ttk.Combobox(
             top,
@@ -65,9 +71,10 @@ class VersusAIPage(ttk.Frame):
         self.run_box.pack(side=tk.LEFT, padx=4)
         self.model_box.pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="刷新", command=self.refresh_runs).pack(side=tk.LEFT, padx=4)
-        self.difficulty_box.pack(side=tk.LEFT, padx=4)
         ttk.Label(top, text="搜索:").pack(side=tk.LEFT)
         self.search_box.pack(side=tk.LEFT, padx=4)
+        ttk.Label(top, text="开局随机:").pack(side=tk.LEFT)
+        self.opening_box.pack(side=tk.LEFT, padx=4)
         ttk.Checkbutton(top, text="人类先手", variable=self.human_first).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="新对局", command=self.new_game).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="加载模型", command=self.load_model).pack(side=tk.LEFT, padx=4)
@@ -129,6 +136,7 @@ class VersusAIPage(ttk.Frame):
             self.status_var.set("请先加载模型。")
             return
         self.state = GameState.new(board_size=self.board_size, win_length=self.win_length)
+        self._ai_move_count = 0
         self.current_game_moves = []
         self.saved_current_game = False
         self.render()
@@ -168,7 +176,7 @@ class VersusAIPage(ttk.Frame):
 
     def _ai_worker(self) -> None:
         engine = self._active_engine()
-        analysis = engine.select_move(self.state.copy(), temperature=self._difficulty_temperature())
+        analysis = engine.select_move(self.state.copy(), temperature=self._move_temperature())
         self.after(0, lambda: self._apply_ai_move(analysis))
 
     def _describe_ai_move(self, analysis) -> str:
@@ -178,7 +186,9 @@ class VersusAIPage(ttk.Frame):
         """
         simulations = self._search_simulations()
         source = "直出" if simulations <= 0 else f"搜索{simulations}"
-        parts = [f"AI({source})", f"估值 {analysis.value_estimate:+.2f}"]
+        # 这一手是否还在开局随机阶段——落子后计数已 +1，故用 <= 判断。
+        opening = self._ai_move_count <= self._opening_random_moves()
+        parts = [f"AI({source}{'·开局随机' if opening else ''})", f"估值 {analysis.value_estimate:+.2f}"]
         if analysis.candidates:
             top = analysis.candidates[0]
             if top.visits is not None:
@@ -197,7 +207,10 @@ class VersusAIPage(ttk.Frame):
             return self.engine
         if simulations not in self._search_engines:
             self._search_engines[simulations] = MCTSEngine(
-                self._model, config=MCTSConfig(simulations=simulations)
+                self._model,
+                # 开局采样只在搜索认可的前 5 手里选，否则低模拟数下访问计数几乎是平的，
+                # 温度采样会抽到角、边这类明显坏手。
+                config=MCTSConfig(simulations=simulations, sample_top_k=5),
             )
         return self._search_engines[simulations]
 
@@ -227,6 +240,7 @@ class VersusAIPage(ttk.Frame):
                 )
             )
             self.state.apply_move(move)
+            self._ai_move_count += 1
             self.render()
             self._show_terminal_if_needed()
             if not self.state.is_terminal:
@@ -247,19 +261,18 @@ class VersusAIPage(ttk.Frame):
     def render(self) -> None:
         self.board.render(self.state)
 
-    def _difficulty_temperature(self) -> float:
-        # 不同思考模式对应的温度：
-        # - 固定：始终选择当前概率最大的动作（贪心，完全确定）
-        # - 稳健：小幅探索
-        # - 标准：中等探索
-        # - 探索：更大随机性
-        mapping = {
-            "固定": 0.0,
-            "稳健": 0.1,
-            "标准": 0.2,
-            "探索": 0.6,
-        }
-        return mapping.get(self.selected_difficulty.get(), 0.2)
+    def _opening_random_moves(self) -> int:
+        mapping = {"关闭": 0, "1 手": 1, "2 手": 2, "4 手": 4}
+        return mapping.get(self.selected_opening.get(), 2)
+
+    def _move_temperature(self) -> float:
+        """AI 前 N 手按分布采样，之后取最优手。
+
+        推理本该全程取最优，但那样同一开局会走出完全相同的一盘棋。把随机性限制在开局，
+        既有多样性，中后盘（决定胜负的地方）又保持满强度。开搜索时采样的是访问计数，
+        本身已高度集中在好手上，温度 1.0 仍然安全。
+        """
+        return 1.0 if self._ai_move_count < self._opening_random_moves() else 0.0
 
     def _save_finished_game(self) -> None:
         if self.saved_current_game or self.current_run_path is None or not self.current_game_moves:

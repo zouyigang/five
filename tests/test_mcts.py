@@ -146,3 +146,57 @@ def test_dirichlet_noise_perturbs_root_priors_without_breaking_search():
     result = engine.select_move(state, temperature=0.0)
 
     assert result.action == Move(4, 4), "加噪不应让搜索错过唾手可得的制胜手"
+
+
+def test_low_simulation_sampling_falls_back_to_the_prior_ordering():
+    """开局分支约 80 个，低模拟数下访问计数是噪声，必须靠先验排序。
+
+    实测 64 次模拟时前 5 名访问数是 [2,2,1,1,1]（仅占 11%），纯按访问排序会把角和边
+    排进前列；加上先验做同分打破后，前 5 全部落在中心邻域。
+    """
+    from five.core.game import GomokuGame
+
+    torch.manual_seed(0)
+    model = PolicyValueNet(board_size=9, channels=8, blocks=1)
+    engine = MCTSEngine(
+        model, device="cpu", config=MCTSConfig(simulations=8, sample_top_k=3)
+    )
+    game = GomokuGame(board_size=9, win_length=5)
+    state = game.new_game()
+    state.apply_move(Move(4, 4))
+
+    # 模拟次数远少于分支数：绝大多数子节点访问数为 0，排序完全由先验决定
+    roots = engine._run_search([state.copy()], np.random.default_rng(0))
+    root = roots[0]
+    ranking = {a: root.children[a].visits + root.children[a].prior for a in root.children}
+    top = max(ranking, key=ranking.get)
+    priors_only = max(root.children, key=lambda a: root.children[a].prior)
+    visited = [a for a in root.children if root.children[a].visits > 0]
+
+    assert len(visited) < len(root.children) // 2, "本用例要求访问计数稀疏"
+    assert ranking[top] > 0
+    # 无访问信息时，排序必须退化为先验排序
+    unvisited_ranking = {a: v for a, v in ranking.items() if root.children[a].visits == 0}
+    assert max(unvisited_ranking, key=unvisited_ranking.get) == max(
+        unvisited_ranking, key=lambda a: root.children[a].prior
+    )
+    assert priors_only in root.children
+
+
+def test_sample_top_k_restricts_choices_to_the_best_ranked_moves():
+    torch.manual_seed(0)
+    model = PolicyValueNet(board_size=9, channels=8, blocks=1)
+    engine = MCTSEngine(
+        model, device="cpu", config=MCTSConfig(simulations=64, sample_top_k=3)
+    )
+    board = Board(size=9, win_length=5)
+    board.grid[4, 4] = 1
+    board.grid[3, 3] = -1
+    state = GameState(board=board, current_player=1)
+
+    chosen = {
+        (r.action.row, r.action.col)
+        for r in (engine.select_move(state.copy(), temperature=1.0) for _ in range(15))
+    }
+
+    assert 1 < len(chosen) <= 3, f"应在前 3 名内取多样性，实际 {chosen}"

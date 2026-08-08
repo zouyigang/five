@@ -29,6 +29,11 @@ class MCTSConfig:
     # 自博弈时在根节点混入 Dirichlet 噪声以保证探索；评估/对弈时设 0 关闭。
     dirichlet_alpha: float = 0.3
     dirichlet_weight: float = 0.0
+    # 温度采样时只在访问数前 K 的着法中抽取；0 = 不限制。
+    # 模拟次数不高时访问计数几乎是平的（64 次模拟摊到约 80 个合法点），温度 1.0
+    # 采样近似均匀乱选，会抽到角和边这种明显坏手。限制到前 K 可在「搜索认可的着法」
+    # 内部取多样性，而不是在全盘乱选。
+    sample_top_k: int = 0
 
 
 class _Node:
@@ -180,14 +185,24 @@ class MCTSEngine:
         visits = np.array([root.children[a].visits for a in actions], dtype=np.float64)
         if visits.sum() <= 0:  # 极端情况：无可搜索的走子，退回先验
             visits = np.array([root.children[a].prior for a in actions], dtype=np.float64)
+        # 采样用的排序分：访问数 + 先验。先验落在 [0,1) 而访问数是整数，所以它只在
+        # 访问数持平时起作用。这在开局尤其要紧——分支约 80 个，64 次模拟下前 5 名的
+        # 访问数是 [2,2,1,1,1]（仅占 11%），纯按访问排序等于按噪声排序，会把角和边
+        # 排进前列；此时网络先验才是唯一有信息的排序依据。
+        priors = np.array([root.children[a].prior for a in actions], dtype=np.float64)
+        ranking = visits + priors
 
         if temperature <= 1e-6:
             choice = int(np.argmax(visits))
         else:
-            weights = visits ** (1.0 / temperature)
+            pool = np.arange(len(actions))
+            top_k = self.config.sample_top_k
+            if top_k > 0 and top_k < len(actions):
+                pool = np.argsort(-ranking)[:top_k]
+            weights = ranking[pool] ** (1.0 / temperature)
             total = weights.sum()
-            weights = weights / total if total > 0 else np.full(len(actions), 1.0 / len(actions))
-            choice = int(rng.choice(len(actions), p=weights))
+            weights = weights / total if total > 0 else np.full(len(pool), 1.0 / len(pool))
+            choice = int(rng.choice(pool, p=weights))
 
         probabilities = visits / visits.sum()
         size = state.board.size
