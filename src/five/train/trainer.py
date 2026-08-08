@@ -49,6 +49,8 @@ RESUME_SKIP_KEYS = frozenset(
         "heuristic_opponent_max_prob",
         "heuristic_start_fraction",
         "heuristic_ramp_fraction",
+        "sparring_checkpoint",
+        "model_opponent_temperature",
     }
 )
 
@@ -222,6 +224,35 @@ class PPOTrainer:
         # 否则锚定的是随机初始化的网络而非实际起点。它从不参与训练，也从不更新。
         self.anchor_engine = self._build_engine_from_state_dict(self._clone_model_state())
         self._reward_executor: ProcessPoolExecutor | None = None
+        self._primary_opponent, self._primary_label = self._build_primary_opponent()
+
+    def _build_primary_opponent(self):
+        """占比最大的那一档对手：默认启发式；给了 sparring_checkpoint 就换成其冻结副本。
+
+        启发式是 1-ply 的，模型稳定完胜之后那 70% 的对局每局都赢、优势趋同，几乎不再
+        提供梯度信号。换更强的陪练是让训练重新有信号可学的直接手段。
+        结构以 checkpoint 记录的为准——陪练与当前模型的尺寸不必相同。
+        """
+        path = self.config.sparring_checkpoint
+        if not path:
+            return HeuristicPlayer(), "heuristic"
+        payload = torch.load(path, map_location=self.device, weights_only=False)
+        saved_model = (payload.get("config") or {}).get("model") or {}
+        channels = int(saved_model.get("channels", self.config.model.channels))
+        blocks = int(saved_model.get("blocks", self.config.model.blocks))
+        model = PolicyValueNet(
+            board_size=self.config.board_size, channels=channels, blocks=blocks
+        ).to(self.device)
+        model.load_state_dict(payload["model_state"])
+        model.eval()
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        LOGGER.info(
+            "Sparring opponent loaded from %s (%dx%d, epoch %s), temperature %.2f",
+            path, channels, blocks, payload.get("epoch", "?"),
+            self.config.model_opponent_temperature,
+        )
+        return ModelAIEngine(model, device=self.config.device), "sparring"
 
     def _get_reward_executor(self) -> ProcessPoolExecutor | None:
         """惰性创建奖励计算进程池，整个 run 复用一个（Windows 下进程启动很慢）。"""
@@ -289,13 +320,22 @@ class PPOTrainer:
 
     def _train(self) -> None:
         start_epoch = getattr(self, "_start_epoch", 1)
+        if start_epoch > self.config.epochs:
+            # epochs 是「总轮数」而非「再练多少轮」。从第 N 轮的 checkpoint 续训时若
+            # --epochs 小于 N，循环区间为空：一轮都不训练，却会留下只有表头的
+            # metrics.csv 和空的 checkpoints 目录，看起来像正常结束。必须显式报错。
+            raise ValueError(
+                f"--epochs={self.config.epochs} 不大于 checkpoint 的轮数 {start_epoch - 1}，"
+                f"没有任何一轮可训练。epochs 是总轮数，续训请传大于 {start_epoch - 1} 的值"
+                f"（例如再练 60 轮就传 --epochs {start_epoch - 1 + 60}）。"
+            )
         for epoch in range(start_epoch, self.config.epochs + 1):
             self._epoch_counter = epoch
             self.model.eval()
             temperature = self._get_temperature(epoch)
             heuristic_prob = self._get_heuristic_prob(epoch)
             historical_opponent = self._sample_historical_opponent()
-            heuristic_opponent = HeuristicPlayer()
+            primary_opponent = self._primary_opponent
 
             batches: list[EpisodeBatch] = []
             total_game_length = 0
@@ -314,8 +354,16 @@ class PPOTrainer:
                     has_historical=historical_opponent is not None,
                 )
                 # 自博弈局不设 tracked_players（双方都记入训练）；对手局只记模型一方。
+                opponent_temperature = None
                 if opponent_kind != "self":
-                    opponent = heuristic_opponent if opponent_kind == "heuristic" else historical_opponent
+                    if opponent_kind == "heuristic":
+                        opponent = primary_opponent
+                        # 启发式分值量级 O(10^4)，温度对它几乎无影响，无需单独设。
+                        if self._primary_label != "heuristic":
+                            opponent_temperature = self.config.model_opponent_temperature
+                    else:
+                        opponent = historical_opponent
+                        opponent_temperature = self.config.model_opponent_temperature
                     if game_offset % 2 == 0:
                         white_engine = opponent
                         tracked_players = {1}
@@ -323,14 +371,18 @@ class PPOTrainer:
                         black_engine = opponent
                         tracked_players = {-1}
                 epoch_opponent_counts[opponent_kind] += 1
+                opponent_label = (
+                    self._primary_label if opponent_kind == "heuristic" else opponent_kind
+                )
                 specs.append(
                     SelfPlaySpec(
                         game_index=game_index,
                         black_engine=black_engine,
                         white_engine=white_engine,
                         tracked_players=tracked_players,
-                        black_player="model" if black_engine is self.engine else opponent_kind,
-                        white_player="model" if white_engine is self.engine else opponent_kind,
+                        black_player="model" if black_engine is self.engine else opponent_label,
+                        white_player="model" if white_engine is self.engine else opponent_label,
+                        opponent_temperature=opponent_temperature,
                     )
                 )
 
@@ -448,7 +500,7 @@ class PPOTrainer:
                     "eval_heuristic=%.2f (b=%.2f w=%.2f) "
                     "eval_anchor=%.2f (b=%.2f w=%.2f) kl=%.4f "
                     "opening_edge=%.3f opening_corner=%.3f opening_center=%.3f topk_edge=%.3f "
-                    "opponents(heur/hist/self)=%d/%d/%d"
+                    "opponents(%s/hist/self)=%d/%d/%d"
                 ),
                 epoch,
                 metric_record.policy_loss,
@@ -472,6 +524,7 @@ class PPOTrainer:
                 metric_record.opening_corner_rate,
                 metric_record.opening_center_rate,
                 metric_record.policy_topk_edge_rate,
+                self._primary_label[:5],
                 epoch_opponent_counts["heuristic"],
                 epoch_opponent_counts["historical"],
                 epoch_opponent_counts["self"],
@@ -900,6 +953,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--sparring-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Use this checkpoint (frozen) as the main opponent instead of the 1-ply heuristic. "
+            "Once the model reliably beats the heuristic those games stop producing gradient signal."
+        ),
+    )
+    parser.add_argument(
+        "--model-opponent-temperature",
+        type=float,
+        default=None,
+        help=(
+            "Sampling temperature for network opponents (historical / sparring), kept separate "
+            f"from the model's own exploration temperature. Default: {d.model_opponent_temperature}"
+        ),
+    )
+    parser.add_argument(
         "--self-play-batch-games",
         type=int,
         default=None,
@@ -956,6 +1027,10 @@ def main() -> None:
         config.model.channels = args.channels
     if args.blocks is not None:
         config.model.blocks = args.blocks
+    if args.sparring_checkpoint is not None:
+        config.sparring_checkpoint = args.sparring_checkpoint
+    if args.model_opponent_temperature is not None:
+        config.model_opponent_temperature = args.model_opponent_temperature
     if args.self_play_batch_games is not None:
         config.self_play_batch_games = max(1, args.self_play_batch_games)
     if args.reward_workers is not None:

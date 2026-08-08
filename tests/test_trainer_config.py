@@ -284,3 +284,19 @@ def test_anchor_column_present_but_empty_is_treated_as_absent():
     ])
 
     assert compute_best_epoch(frame) == 1
+
+
+def test_resuming_with_epochs_below_checkpoint_raises_instead_of_doing_nothing(tmp_path):
+    """回归：epochs 是总轮数，小于 checkpoint 轮数时循环为空，此前会静默「成功」。"""
+    model, optimizer = _run_cosine(3.5e-4, 1.5e-5, 600, 80)
+    checkpoint = tmp_path / "epoch_080.pt"
+    _save_checkpoint(checkpoint, optimizer, model, epoch=80)
+
+    config = TrainingConfig(
+        board_size=9, device="cpu", epochs=60, runs_dir=str(tmp_path / "runs"),
+        model=ModelConfig(channels=8, blocks=1),
+    )
+    trainer = PPOTrainer(config, checkpoint_path=str(checkpoint))
+
+    with pytest.raises(ValueError, match="总轮数"):
+        trainer.train()

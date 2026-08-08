@@ -174,6 +174,14 @@ class TrainingConfig:
     temperature_anneal_fraction: float = 0.75
     # 对手采样：历史模型概率、池大小、每隔多少轮取一次快照；启发式对手最大概率及从第几轮开始、多少轮内 ramp 到最大
     historical_opponent_prob: float = 0.4
+    # 主对手（占比最大的那一档）默认是 1-ply 启发式。给了 checkpoint 路径就换成它的
+    # 冻结副本：模型稳定完胜启发式之后，那 70% 的对局每局都赢、优势趋同，几乎不再
+    # 提供梯度信号；换个更强的陪练才能重新拉开差距。
+    sparring_checkpoint: str | None = None
+    # 神经网络对手（历史快照 / 陪练 checkpoint）的采样温度，与模型自身的探索温度分开。
+    # 模型温度按调度从 1.3 退到 0.35，用它去采样网络对手会把对手明显削弱（网络 logits
+    # 是 O(1~10)）；启发式不受影响，它的分值量级是 O(10^4)。
+    model_opponent_temperature: float = 0.35
     opponent_pool_size: int = 80
     opponent_snapshot_interval: int = 3
     heuristic_opponent_max_prob: float = 0.70

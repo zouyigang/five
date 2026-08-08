@@ -158,6 +158,11 @@ class SelfPlaySpec:
     tracked_players: set[int] | None = None
     black_player: str = "selfplay_model"
     white_player: str = "selfplay_model"
+    # 对手一方的采样温度；None 表示与模型同温。
+    # 神经网络对手必须单独设：它的 logits 是 O(1~10)，用模型的探索温度（默认 1.3）
+    # 会被明显摊平而变弱；启发式则不受影响——它的分值量级是 O(10^4)，任何常规温度下
+    # 仍几乎必选最优手。不分开设的话，「换个更强的陪练」会被温度悄悄抵消掉。
+    opponent_temperature: float | None = None
 
 
 class _GameRunner:
@@ -179,6 +184,15 @@ class _GameRunner:
 
     def acting_engine(self) -> AIEngine:
         return self.spec.black_engine if self.state.current_player == 1 else self.white_engine
+
+    def acting_temperature(self, default: float) -> float:
+        """当前该走子的一方应使用的温度。
+
+        自博弈局双方都被追踪，全程用 default；对手局里未被追踪的那一方才是对手。
+        """
+        if self.spec.opponent_temperature is None:
+            return default
+        return default if self.state.current_player in self.tracked_players else self.spec.opponent_temperature
 
     def apply(self, analysis: AnalysisResult) -> None:
         state = self.state
@@ -296,13 +310,16 @@ def play_self_play_games(
         active = [runner for runner in runners if not runner.finished]
         if not active:
             break
-        groups: dict[int, list[_GameRunner]] = {}
+        # 分组键含温度：同一个引擎可能同时以模型身份和对手身份出现（历史对手就是
+        # 模型的旧副本），温度不同就不能混在一批里求解。
+        groups: dict[tuple[int, float], list[_GameRunner]] = {}
         for runner in active:
-            groups.setdefault(id(runner.acting_engine()), []).append(runner)
-        for group in groups.values():
+            key = (id(runner.acting_engine()), runner.acting_temperature(temperature))
+            groups.setdefault(key, []).append(runner)
+        for (_engine_id, group_temperature), group in groups.items():
             engine = group[0].acting_engine()
             analyses = select_moves_batched(
-                engine, [runner.state for runner in group], temperature=temperature
+                engine, [runner.state for runner in group], temperature=group_temperature
             )
             for runner, analysis in zip(group, analyses):
                 runner.apply(analysis)

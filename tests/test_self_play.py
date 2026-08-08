@@ -138,3 +138,53 @@ def test_model_engine_batched_selection_matches_single_calls():
     for left, right in zip(batched, single):
         assert left.action_probability == pytest.approx(right.action_probability, abs=1e-5)
         assert left.value_estimate == pytest.approx(right.value_estimate, abs=1e-5)
+
+
+def test_opponent_temperature_is_applied_only_to_the_untracked_side():
+    """网络对手必须能用自己的温度：模型探索温度会把它明显削弱。"""
+    game = GomokuGame(board_size=9, win_length=5)
+    seen: list[tuple[str, float]] = []
+
+    class _TemperatureProbe(_DeterministicEngine):
+        def __init__(self, label: str) -> None:
+            super().__init__()
+            self.label = label
+
+        def select_move(self, state, temperature=0.0):
+            seen.append((self.label, temperature))
+            return super().select_move(state, temperature=temperature)
+
+    model = _TemperatureProbe("model")
+    opponent = _TemperatureProbe("opponent")
+    specs = [
+        SelfPlaySpec(
+            game_index=1,
+            black_engine=model,
+            white_engine=opponent,
+            tracked_players={1},
+            opponent_temperature=0.35,
+        )
+    ]
+
+    play_self_play_games(game, specs, run_id="r", temperature=1.3)
+
+    assert {t for label, t in seen if label == "model"} == {1.3}
+    assert {t for label, t in seen if label == "opponent"} == {0.35}
+
+
+def test_self_play_games_ignore_opponent_temperature():
+    """自博弈局双方都被追踪，全程用模型温度。"""
+    game = GomokuGame(board_size=9, win_length=5)
+    seen: list[float] = []
+
+    class _Probe(_DeterministicEngine):
+        def select_move(self, state, temperature=0.0):
+            seen.append(temperature)
+            return super().select_move(state, temperature=temperature)
+
+    engine = _Probe()
+    specs = [SelfPlaySpec(game_index=1, black_engine=engine, opponent_temperature=0.35)]
+
+    play_self_play_games(game, specs, run_id="r", temperature=1.3)
+
+    assert set(seen) == {1.3}
