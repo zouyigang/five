@@ -94,6 +94,16 @@ Rewards are assigned after the game ends (`_apply_hybrid_rewards`), using each t
 
 Pick `best_for_resume.pt` for `five-train --checkpoint`, `best.pt` for human-vs-AI play.
 
+### MCTS
+
+`five.ai.mcts.MCTSEngine` is a PUCT search that plugs in as a normal `AIEngine` (it implements `select_moves`, so `select_moves_batched` batches it). It is **not** wired into training — MCTS picks moves by visit count, which is not the policy PPO updates, so using it in self-play would break the importance ratio the same way the sampling-temperature mismatch did. Turning it into a training signal means switching to the AlphaZero objective (cross-entropy to visit counts + value regression), which is a separate change.
+
+**Batching across games is what makes it affordable.** All trees advance in lockstep: every simulation round descends each tree to a leaf, evaluates *all* leaves in one forward, then backs up. N games × S simulations costs S forwards of batch N instead of N×S forwards of batch 1.
+
+`_Node.value` is always from **that node's side to move**, so a parent scores a child as `-child.value`, and `_backup` negates once per level. `_terminal_value` returns `-1` for a decided game because `apply_move` does not flip `current_player` on a terminal move — the side that "would" move next is the loser.
+
+**Search amplifies a prior, it does not replace one.** Measured with an untrained network on the same position: finding a win-in-1 needs 64 simulations, finding the block-in-1 needs 2048 (32×). Winning is one ply — any child is immediately terminal; blocking is two — you must play a non-blocking move *and* have the opponent happen to pick the winning reply out of ~76 options. With a trained prior the blocking move already carries most of the mass, so real usage needs far fewer simulations.
+
 ### State encoding
 
 `encode_state` produces 4 planes, and planes 0/1 are **relative to the side to move** (own stones, opponent stones), not to black/white. Any change to the plane layout or ordering silently invalidates every existing checkpoint *and* every generated `.pt` dataset — there is no version field to catch it.
