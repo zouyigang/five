@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -7,6 +8,7 @@ from tkinter import messagebox, ttk
 import torch
 
 from five.ai.inference import ModelAIEngine
+from five.ai.interfaces import AnalysisResult
 from five.ai.mcts import MCTSConfig, MCTSEngine
 from five.ai.model import PolicyValueNet
 from five.common.utils import timestamp
@@ -176,7 +178,9 @@ class VersusAIPage(ttk.Frame):
 
     def _ai_worker(self) -> None:
         engine = self._active_engine()
-        analysis = engine.select_move(self.state.copy(), temperature=self._move_temperature())
+        # 一律按最优手求解，开局的随机性在候选里做——见 _apply_opening_choice。
+        analysis = engine.select_move(self.state.copy(), temperature=0.0)
+        analysis = self._apply_opening_choice(analysis)
         self.after(0, lambda: self._apply_ai_move(analysis))
 
     def _describe_ai_move(self, analysis) -> str:
@@ -189,10 +193,17 @@ class VersusAIPage(ttk.Frame):
         # 这一手是否还在开局随机阶段——落子后计数已 +1，故用 <= 判断。
         opening = self._ai_move_count <= self._opening_random_moves()
         parts = [f"AI({source}{'·开局随机' if opening else ''})", f"估值 {analysis.value_estimate:+.2f}"]
+
         if analysis.candidates:
             top = analysis.candidates[0]
-            if top.visits is not None:
-                parts.append(f"首选 ({top.move.row},{top.move.col}) 访问 {top.score:.0%}")
+            # 直出没有搜索树，候选只带策略概率；搜索则带访问计数。两种都要显示，
+            # 否则关掉搜索时状态栏只剩一个估值。
+            metric = "访问" if top.visits is not None else "概率"
+            parts.append(f"首选 ({top.move.row},{top.move.col}) {metric} {top.score:.0%}")
+            played = analysis.action
+            if (played.row, played.col) != (top.move.row, top.move.col):
+                # 开局随机阶段会采样到非首选手，标出来免得看着像 AI 走错
+                parts.append(f"实走 ({played.row},{played.col}) {analysis.action_probability:.0%}")
         return " | ".join(parts)
 
     def _search_simulations(self) -> int:
@@ -265,14 +276,25 @@ class VersusAIPage(ttk.Frame):
         mapping = {"关闭": 0, "1 手": 1, "2 手": 2, "4 手": 4}
         return mapping.get(self.selected_opening.get(), 2)
 
-    def _move_temperature(self) -> float:
-        """AI 前 N 手按分布采样，之后取最优手。
+    def _apply_opening_choice(self, analysis):
+        """开局前 N 手在**候选手**里按权重采样，其余一律用最优手。
 
-        推理本该全程取最优，但那样同一开局会走出完全相同的一盘棋。把随机性限制在开局，
-        既有多样性，中后盘（决定胜负的地方）又保持满强度。开搜索时采样的是访问计数，
-        本身已高度集中在好手上，温度 1.0 仍然安全。
+        不用引擎的温度参数，因为两种引擎在低算力下都会采到坏手：直出是全分布采样，
+        能抽中概率 0% 的点；搜索在 64 次模拟下访问计数几乎是平的。而两种引擎都会返回
+        top-5 候选，在候选内部采样即可——多样性只在「搜索/网络都认可的手」里取。
         """
-        return 1.0 if self._ai_move_count < self._opening_random_moves() else 0.0
+        if self._ai_move_count >= self._opening_random_moves():
+            return analysis
+        candidates = [c for c in analysis.candidates if c.score > 0]
+        if len(candidates) < 2:
+            return analysis
+        picked = random.choices(candidates, weights=[c.score for c in candidates], k=1)[0]
+        return AnalysisResult(
+            action=picked.move,
+            action_probability=picked.score,
+            value_estimate=analysis.value_estimate,
+            candidates=analysis.candidates,
+        )
 
     def _save_finished_game(self) -> None:
         if self.saved_current_game or self.current_run_path is None or not self.current_game_moves:

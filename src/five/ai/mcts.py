@@ -29,6 +29,9 @@ class MCTSConfig:
     # 自博弈时在根节点混入 Dirichlet 噪声以保证探索；评估/对弈时设 0 关闭。
     dirichlet_alpha: float = 0.3
     dirichlet_weight: float = 0.0
+    # 随机种子。None = 每次调用取新熵（对弈时需要），给定则完全可复现——
+    # 根节点 Dirichlet 噪声与温度采样都走它，否则测试与复现实验都会时好时坏。
+    seed: int | None = None
     # 温度采样时只在访问数前 K 的着法中抽取；0 = 不限制。
     # 模拟次数不高时访问计数几乎是平的（64 次模拟摊到约 80 个合法点），温度 1.0
     # 采样近似均匀乱选，会抽到角和边这种明显坏手。限制到前 K 可在「搜索认可的着法」
@@ -226,7 +229,7 @@ class MCTSEngine:
     def select_moves(self, states: list[GameState], temperature: float = 0.0) -> list[AnalysisResult]:
         if not states:
             return []
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(self.config.seed)
         roots = self._run_search(states, rng)
         return [
             self._result_from_root(root, state, temperature, rng)

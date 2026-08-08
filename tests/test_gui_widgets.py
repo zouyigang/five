@@ -114,28 +114,69 @@ def test_no_model_falls_back_to_the_raw_engine():
     assert page._active_engine() is page.engine
 
 
-def test_opening_moves_are_sampled_then_play_turns_greedy():
-    """随机性只在开局：前 N 手采样，之后必须全程取最优手。"""
+def _analysis(actions_scores):
+    from five.ai.interfaces import AnalysisResult, CandidateMove
+    from five.core.move import Move
+
+    cands = [CandidateMove(move=Move(r, c), score=s) for (r, c), s in actions_scores]
+    return AnalysisResult(
+        action=cands[0].move,
+        action_probability=cands[0].score,
+        value_estimate=0.0,
+        candidates=cands,
+    )
+
+
+def test_opening_randomness_only_picks_among_candidates():
+    """回归：直出模式全分布采样能抽到概率 0% 的坏手；只在候选里采样可杜绝。"""
     page = _versus_page()
     page.selected_opening = _fixed("2 手")
-
     page._ai_move_count = 0
-    assert page._move_temperature() == 1.0
-    page._ai_move_count = 1
-    assert page._move_temperature() == 1.0
+    analysis = _analysis([((4, 4), 0.5), ((4, 3), 0.3), ((3, 4), 0.2)])
+
+    picked = set()
+    for _ in range(40):
+        action = page._apply_opening_choice(analysis).action
+        picked.add((action.row, action.col))
+
+    assert picked <= {(4, 4), (4, 3), (3, 4)}, f"越出候选范围: {picked}"
+    assert len(picked) > 1, "开局阶段应有多样性"
+
+
+def test_moves_past_the_opening_window_are_always_the_top_candidate():
+    page = _versus_page()
+    page.selected_opening = _fixed("2 手")
     page._ai_move_count = 2
-    assert page._move_temperature() == 0.0
-    page._ai_move_count = 30
-    assert page._move_temperature() == 0.0
+    analysis = _analysis([((4, 4), 0.5), ((4, 3), 0.3)])
+
+    for _ in range(10):
+        result = page._apply_opening_choice(analysis)
+        assert (result.action.row, result.action.col) == (4, 4)
 
 
 def test_opening_randomisation_can_be_switched_off():
     page = _versus_page()
     page.selected_opening = _fixed("关闭")
-
     page._ai_move_count = 0
+    analysis = _analysis([((4, 4), 0.5), ((4, 3), 0.3)])
+
     assert page._opening_random_moves() == 0
-    assert page._move_temperature() == 0.0, "关闭时第一手就该取最优"
+    action = page._apply_opening_choice(analysis).action
+    assert (action.row, action.col) == (4, 4)
+
+
+def test_zero_probability_candidates_are_never_played():
+    page = _versus_page()
+    page.selected_opening = _fixed("4 手")
+    page._ai_move_count = 0
+    analysis = _analysis([((4, 4), 0.9), ((0, 0), 0.0), ((8, 8), 0.0)])
+
+    picked = set()
+    for _ in range(40):
+        action = page._apply_opening_choice(analysis).action
+        picked.add((action.row, action.col))
+
+    assert picked == {(4, 4)}, f"概率为 0 的手不该被选中: {picked}"
 
 
 def test_opening_levels_map_to_move_counts():

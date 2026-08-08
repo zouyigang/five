@@ -135,17 +135,41 @@ def test_temperature_sampling_stays_within_legal_moves():
 
 
 def test_dirichlet_noise_perturbs_root_priors_without_breaking_search():
+    """加噪不应让搜索错过唾手可得的制胜手。
+
+    模拟数取 128 而非 64：实测 64 次 + 噪声只有 88% 命中（60 次里中 53 次），
+    做成断言就是个会偶发失败的测试；128 次实测 60/60。
+    """
     state = _state([(4, c, 1) for c in range(4)], player=1)
     torch.manual_seed(0)
     model = PolicyValueNet(board_size=9, channels=8, blocks=1)
     engine = MCTSEngine(
         model, device="cpu",
-        config=MCTSConfig(simulations=64, dirichlet_weight=0.25),
+        config=MCTSConfig(simulations=128, dirichlet_weight=0.25, seed=1234),
     )
 
     result = engine.select_move(state, temperature=0.0)
 
-    assert result.action == Move(4, 4), "加噪不应让搜索错过唾手可得的制胜手"
+    assert result.action == Move(4, 4)
+
+
+def test_seed_makes_temperature_sampling_reproducible():
+    """无种子时搜索不可复现，测试与复现实验都会时好时坏。"""
+    state = _state([(4, 4, 1), (3, 3, -1)], player=1)
+    torch.manual_seed(0)
+    model = PolicyValueNet(board_size=9, channels=8, blocks=1)
+
+    def run(seed):
+        engine = MCTSEngine(
+            model, device="cpu",
+            config=MCTSConfig(simulations=32, sample_top_k=5, seed=seed),
+        )
+        return [
+            (r.action.row, r.action.col)
+            for r in (engine.select_move(state.copy(), temperature=1.0) for _ in range(6))
+        ]
+
+    assert run(7) == run(7)
 
 
 def test_low_simulation_sampling_falls_back_to_the_prior_ordering():
