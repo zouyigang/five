@@ -39,6 +39,19 @@ class MCTSConfig:
     sample_top_k: int = 0
 
 
+@dataclass(slots=True)
+class SearchResult:
+    """一次搜索的原始产物，供 AlphaZero 当训练标签用。
+
+    `policy` 是长度 board_size^2 的完整访问分布（非法点为 0），不是 top-K 候选——
+    策略标签需要整个分布，softmax 的交叉熵才有意义。
+    """
+
+    policy: np.ndarray
+    value: float
+    visits: int
+
+
 class _Node:
     """搜索树节点。
 
@@ -225,6 +238,27 @@ class MCTSEngine:
             value_estimate=float(root.value),
             candidates=candidates,
         )
+
+    def search(self, states: list[GameState]) -> list[SearchResult]:
+        """只做搜索并返回完整访问分布，不选手。
+
+        与 select_moves 分开是因为落子温度可以逐局不同（AlphaZero 自博弈前 N 手用
+        温度 1.0、之后贪心），而搜索树本身与温度无关，整批一次构建即可。
+        """
+        if not states:
+            return []
+        roots = self._run_search(states, np.random.default_rng(self.config.seed))
+        results = []
+        for root, state in zip(roots, states):
+            size = state.board.size
+            policy = np.zeros(size * size, dtype=np.float32)
+            for action, child in root.children.items():
+                policy[action] = child.visits
+            total = policy.sum()
+            if total > 0:
+                policy /= total
+            results.append(SearchResult(policy=policy, value=root.value, visits=root.visits))
+        return results
 
     def select_moves(self, states: list[GameState], temperature: float = 0.0) -> list[AnalysisResult]:
         if not states:
