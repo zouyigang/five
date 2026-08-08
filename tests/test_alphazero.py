@@ -197,3 +197,43 @@ def test_value_targets_are_not_perfectly_predictable_from_turn_parity():
 
     values = {e.value for e in examples}
     assert len(values) > 1, "所有样本的 z 相同，没有可学的差异"
+
+
+def test_augmentation_produces_eight_consistent_symmetries():
+    """增广必须同时变换局面与标签，否则等于喂噪声。"""
+    from five.train.alphazero import augment
+
+    state = torch.zeros(4, 9, 9)
+    state[0, 0, 1] = 1.0  # 己方一子在 (0,1)
+    policy = np.zeros(81, dtype=np.float32)
+    policy[0 * 9 + 1] = 1.0  # 标签也指向 (0,1)
+    example = TrainingExample(state=state, policy=policy, value=0.5)
+
+    variants = augment(example)
+
+    assert len(variants) == 8
+    for variant in variants:
+        assert variant.value == 0.5
+        assert variant.policy.sum() == pytest.approx(1.0)
+        # 标签指向的格子，在变换后的局面里必须仍是那颗己方子
+        index = int(np.argmax(variant.policy))
+        assert variant.state[0].flatten()[index] == 1.0
+
+
+def test_augmentation_covers_eight_distinct_orientations():
+    from five.train.alphazero import augment
+
+    state = torch.zeros(4, 9, 9)
+    state[0, 0, 1] = 1.0
+    state[1, 2, 0] = 1.0  # 加一个不对称的点，避免自身对称导致重复
+    policy = np.zeros(81, dtype=np.float32)
+    policy[1] = 1.0
+    variants = augment(TrainingExample(state=state, policy=policy, value=0.0))
+
+    signatures = {tuple(v.state[0].flatten().tolist()) for v in variants}
+    assert len(signatures) == 8, f"只得到 {len(signatures)} 种朝向，增广有重复"
+
+
+def test_augmentation_can_be_switched_off():
+    config = _config(augment_symmetries=False)
+    assert config.augment_symmetries is False

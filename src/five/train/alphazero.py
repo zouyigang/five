@@ -66,6 +66,9 @@ class AlphaZeroConfig:
     # 经验回放：保留最近多少局的样本。只用当代数据会严重欠采样，
     # 且策略每代跳变会让价值头拟合不稳。
     replay_games: int = 2048
+    # 八重对称增广：棋盘旋转/翻转不改变棋理，样本量 x8 而不增加搜索开销。
+    # 实测每代样本量是训练损伤的主因（64 局 -26.7% -> 256 局 -10.0%）。
+    augment_symmetries: bool = True
     device: str = "cuda"
     seed: int = 7
 
@@ -121,6 +124,35 @@ class _GameBuffer:
             )
             for state, policy, player in zip(self.states, self.policies, self.players)
         ]
+
+
+def augment(example: TrainingExample) -> list[TrainingExample]:
+    """八重对称增广：一个样本扩成 8 个（4 个旋转 x 是否镜像）。
+
+    棋盘的旋转与翻转不改变棋理，所以标签可以原样跟着变换。自博弈是最贵的一步
+    （每手要跑 S 次搜索），而增广是纯张量变换、几乎免费。
+
+    实测训练损伤随每代样本量下降：2.7k 样本(64 局) -26.7%，10.7k(256 局) -10.0%，
+    之后走平。增广等于把样本量再乘 8，且不增加任何搜索开销。
+
+    状态的 4 个平面里前 3 个是空间平面（己方/对方/上一手），第 4 个是常数的
+    走子方平面——对它做旋转是恒等操作，一并变换不会出错。
+    """
+    board_size = example.state.shape[-1]
+    grid = example.policy.reshape(board_size, board_size)
+    out: list[TrainingExample] = []
+    for flip in (False, True):
+        state = torch.flip(example.state, dims=[-1]) if flip else example.state
+        policy = np.fliplr(grid) if flip else grid
+        for rotation in range(4):
+            out.append(
+                TrainingExample(
+                    state=torch.rot90(state, k=rotation, dims=[-2, -1]).contiguous(),
+                    policy=np.ascontiguousarray(np.rot90(policy, k=rotation)).reshape(-1),
+                    value=example.value,
+                )
+            )
+    return out
 
 
 def _sample_move(policy: np.ndarray, temperature: float, rng: random.Random) -> int:
@@ -264,7 +296,10 @@ class AlphaZeroTrainer:
 
     def _replay_capacity(self) -> int:
         # 按「局数 x 每局平均手数」估容量；对局长度会随训练变化，取一个宽裕的估计。
-        return self.config.replay_games * self.config.board_size
+        # 开增广后每个局面会变成 8 条样本，容量要同步放大，否则回放池只装得下
+        # 1/8 的对局，等于悄悄缩短了历史跨度。
+        capacity = self.config.replay_games * self.config.board_size
+        return capacity * 8 if self.config.augment_symmetries else capacity
 
     def _load(self, checkpoint_path: str) -> None:
         payload = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
@@ -294,6 +329,8 @@ class AlphaZeroTrainer:
         examples, stats = play_self_play_games(
             self.game, self._engine(), self.config.games_per_iteration, self.config, self.rng
         )
+        if self.config.augment_symmetries:
+            examples = [aug for example in examples for aug in augment(example)]
         self.replay.extend(examples)
         losses = train_on_examples(
             self.model, self.optimizer, list(self.replay), self.config, self.device
