@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 import torch
 
 from five.ai.inference import ModelAIEngine
+from five.ai.mcts import MCTSConfig, MCTSEngine
 from five.ai.model import PolicyValueNet
 from five.common.utils import timestamp
 from five.core.move import Move
@@ -23,6 +24,11 @@ class VersusAIPage(ttk.Frame):
         self.selected_run = tk.StringVar()
         self.selected_model = tk.StringVar()
         self.selected_difficulty = tk.StringVar(value="标准")
+        # 搜索强度。单局对弈用不上跨对局批量，每次模拟就是一次 batch=1 前向，
+        # 实测本机 64/200/800 模拟约 125/400/1600 ms 一手，对人机对弈都可接受。
+        self.selected_search = tk.StringVar(value="标准(200)")
+        self._search_engines: dict[int, MCTSEngine] = {}
+        self._model: PolicyValueNet | None = None
         self.human_first = tk.BooleanVar(value=True)
         self._run_lookup: dict[str, Path] = {}
         self._model_lookup: dict[str, str] = {}
@@ -49,10 +55,19 @@ class VersusAIPage(ttk.Frame):
             width=10,
             values=["固定", "稳健", "标准", "探索"],
         )
+        self.search_box = ttk.Combobox(
+            top,
+            textvariable=self.selected_search,
+            state="readonly",
+            width=12,
+            values=["关闭(直出)", "快(64)", "标准(200)", "强(800)"],
+        )
         self.run_box.pack(side=tk.LEFT, padx=4)
         self.model_box.pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="刷新", command=self.refresh_runs).pack(side=tk.LEFT, padx=4)
         self.difficulty_box.pack(side=tk.LEFT, padx=4)
+        ttk.Label(top, text="搜索:").pack(side=tk.LEFT)
+        self.search_box.pack(side=tk.LEFT, padx=4)
         ttk.Checkbutton(top, text="人类先手", variable=self.human_first).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="新对局", command=self.new_game).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="加载模型", command=self.load_model).pack(side=tk.LEFT, padx=4)
@@ -99,10 +114,11 @@ class VersusAIPage(ttk.Frame):
         blocks = int(config.get("model", {}).get("blocks", 4))
         self.board_size = board_size
         self.win_length = int(config.get("win_length", 5))
-        self.engine = ModelAIEngine(
-            PolicyValueNet(board_size=board_size, channels=channels, blocks=blocks)
-        )
+        self._model = PolicyValueNet(board_size=board_size, channels=channels, blocks=blocks)
+        self.engine = ModelAIEngine(self._model)
         self.engine.load_checkpoint(checkpoint_path)
+        # 换模型后原有的搜索引擎持有旧权重，必须丢弃。
+        self._search_engines.clear()
         self.current_model_path = checkpoint_path
         self.model_loaded = True
         self.status_var.set(f"已加载模型: {self.selected_model.get()}")
@@ -151,8 +167,39 @@ class VersusAIPage(ttk.Frame):
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
     def _ai_worker(self) -> None:
-        analysis = self.engine.select_move(self.state.copy(), temperature=self._difficulty_temperature())
+        engine = self._active_engine()
+        analysis = engine.select_move(self.state.copy(), temperature=self._difficulty_temperature())
         self.after(0, lambda: self._apply_ai_move(analysis))
+
+    def _describe_ai_move(self, analysis) -> str:
+        """把这一手的依据摘要到状态栏：搜索强度、局面估值、首选手的访问占比。
+
+        估值是**走子方视角**，正数表示 AI 认为自己占优。
+        """
+        simulations = self._search_simulations()
+        source = "直出" if simulations <= 0 else f"搜索{simulations}"
+        parts = [f"AI({source})", f"估值 {analysis.value_estimate:+.2f}"]
+        if analysis.candidates:
+            top = analysis.candidates[0]
+            if top.visits is not None:
+                parts.append(f"首选 ({top.move.row},{top.move.col}) 访问 {top.score:.0%}")
+        return " | ".join(parts)
+
+    def _search_simulations(self) -> int:
+        """下拉框选项 -> 模拟次数；0 表示不搜索，直接用网络输出。"""
+        mapping = {"关闭(直出)": 0, "快(64)": 64, "标准(200)": 200, "强(800)": 800}
+        return mapping.get(self.selected_search.get(), 200)
+
+    def _active_engine(self):
+        """按当前搜索强度返回引擎；搜索引擎按模拟次数缓存，复用同一份权重。"""
+        simulations = self._search_simulations()
+        if simulations <= 0 or self._model is None:
+            return self.engine
+        if simulations not in self._search_engines:
+            self._search_engines[simulations] = MCTSEngine(
+                self._model, config=MCTSConfig(simulations=simulations)
+            )
+        return self._search_engines[simulations]
 
     def _apply_ai_move(self, analysis) -> None:
         self.ai_busy = False
@@ -183,7 +230,7 @@ class VersusAIPage(ttk.Frame):
             self.render()
             self._show_terminal_if_needed()
             if not self.state.is_terminal:
-                self.status_var.set("轮到你。")
+                self.status_var.set(f"轮到你。 {self._describe_ai_move(analysis)}")
         else:
             self.status_var.set("AI 返回了非法着法。")
 

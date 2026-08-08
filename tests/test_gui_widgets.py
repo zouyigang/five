@@ -57,3 +57,51 @@ def test_pretrain_polling_only_runs_while_page_is_active() -> None:
     page.set_active(False)
     assert cancelled == ["after#1"]
     assert page._poll_after_id is None
+
+
+def _versus_page():
+    """不启 Tk：只构造对象并塞入必要属性，测选择逻辑本身。"""
+    from five.gui.pages.versus_ai_page import VersusAIPage
+
+    page = VersusAIPage.__new__(VersusAIPage)
+    page._search_engines = {}
+    page._model = None
+    page.engine = object()
+    return page
+
+
+def test_search_off_uses_the_raw_network_engine():
+    page = _versus_page()
+    page.selected_search = type("V", (), {"get": staticmethod(lambda: "关闭(直出)")})()
+
+    assert page._search_simulations() == 0
+    assert page._active_engine() is page.engine
+
+
+def test_search_levels_map_to_simulation_counts():
+    page = _versus_page()
+    for label, expected in [("快(64)", 64), ("标准(200)", 200), ("强(800)", 800)]:
+        page.selected_search = type("V", (), {"get": staticmethod(lambda l=label: l)})()
+        assert page._search_simulations() == expected
+
+
+def test_search_engines_are_cached_per_simulation_count():
+    from five.ai.model import PolicyValueNet
+
+    page = _versus_page()
+    page._model = PolicyValueNet(board_size=9, channels=8, blocks=1)
+    page.selected_search = type("V", (), {"get": staticmethod(lambda: "快(64)")})()
+
+    first = page._active_engine()
+    second = page._active_engine()
+
+    assert first is second, "同一强度应复用引擎，不该每手重建"
+    assert first.config.simulations == 64
+
+
+def test_no_model_falls_back_to_the_raw_engine():
+    """模型未加载时不能去建搜索引擎（会拿到 None 权重）。"""
+    page = _versus_page()
+    page.selected_search = type("V", (), {"get": staticmethod(lambda: "强(800)")})()
+
+    assert page._active_engine() is page.engine
